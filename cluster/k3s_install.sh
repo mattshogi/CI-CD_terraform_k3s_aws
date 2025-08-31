@@ -503,12 +503,9 @@ main() {
   install_helm
   install_k3s
   if [ "${NODE_INDEX:-0}" = "0" ]; then
-  wait_for_core_components
-    setup_helm_repos
-    install_ingress
-    install_monitoring
-  wait_for_traefik
-  expose_monitoring
+    echo "[STAGE START] core-readiness"; wait_for_core_components; echo "[STAGE END] core-readiness"
+    echo "[STAGE START] helm-setup"; setup_helm_repos; echo "[STAGE END] helm-setup"
+    echo "[STAGE START] monitoring-ingress"; install_ingress; install_monitoring; wait_for_traefik; expose_monitoring; echo "[STAGE END] monitoring-ingress"
     echo "[INFO] Deploying hello-world with retry attempts..."
     local deploy_attempt=1
     local deploy_max=5
@@ -521,8 +518,44 @@ main() {
       sleep 15
       deploy_attempt=$((deploy_attempt+1))
     done
+    echo "[STAGE START] ingress-wait"; wait_for_hello_world_ingress || true; echo "[STAGE END] ingress-wait"
+    echo "[STAGE START] nodeport-wait"; wait_for_nodeport_rule || true; echo "[STAGE END] nodeport-wait"
   fi
   finalize_installation
+}
+
+wait_for_hello_world_ingress() {
+  echo "[INFO] Waiting for hello-world ingress to be admitted..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  local timeout=180 waited=0
+  while [ $waited -lt $timeout ]; do
+    if k3s kubectl get ingress -n hello-world hello-world >/dev/null 2>&1; then
+      local backend
+      backend=$(k3s kubectl get ingress -n hello-world hello-world -o jsonpath='{.spec.rules[0].http.paths[0].backend.service.name}' 2>/dev/null || true)
+      if [ -n "$backend" ]; then
+        echo "[INFO] Ingress backend resolved: $backend"
+        return 0
+      fi
+    fi
+    sleep 5; waited=$((waited+5))
+  done
+  echo "[WARN] Ingress not ready after ${timeout}s"
+  return 1
+}
+
+wait_for_nodeport_rule() {
+  echo "[INFO] Checking for NodePort ${HELLO_NODE_PORT} iptables rule..."
+  local timeout=180 waited=0
+  while [ $waited -lt $timeout ]; do
+    if iptables -t nat -L KUBE-NODEPORTS -n 2>/dev/null | grep -q ":${HELLO_NODE_PORT}"; then
+      echo "[INFO] NodePort rule present for ${HELLO_NODE_PORT}"
+      return 0
+    fi
+    if (( waited % 30 == 0 )); then echo "[DEBUG] NodePort rule missing (waited ${waited}s)"; fi
+    sleep 5; waited=$((waited+5))
+  done
+  echo "[WARN] NodePort rule not detected after ${timeout}s"
+  return 1
 }
 
 trap 'echo "[ERROR] Installation failed at line $LINENO"' ERR
