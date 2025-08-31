@@ -484,12 +484,6 @@ finalize_installation() {
   echo "[INFO] Creating /tmp/k3s-ready marker"; touch /tmp/k3s-ready || true
 }
 
-main() {
-  echo "[INFO] Starting k3s installation"
-  echo "[INFO] Node Type: $([ "${NODE_INDEX:-0}" = "0" ] && echo "Server" || echo "Agent")"
-  systemctl disable --now ufw 2>/dev/null || true
-  wait_for_system
-  install_ingress() { echo "[INFO] install_ingress: no-op (using bundled traefik)"; }
 wait_for_hello_world_ingress() {
   echo "[INFO] Waiting for hello-world ingress to be admitted..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -522,6 +516,27 @@ wait_for_nodeport_rule() {
   done
   echo "[WARN] NodePort rule not detected after ${timeout}s"
   return 1
+}
+
+main() {
+  echo "[INFO] Starting k3s installation"
+  echo "[INFO] Node Type: $([ "${NODE_INDEX:-0}" = "0" ] && echo "Server" || echo "Agent")"
+  systemctl disable --now ufw 2>/dev/null || true
+  wait_for_system
+  install_system_deps
+  setup_swap
+  install_docker
+  install_k3s
+  wait_for_core_components
+  wait_for_traefik
+  setup_helm_repos
+  install_ingress
+  deploy_hello_world
+  wait_for_hello_world_ingress || true
+  wait_for_nodeport_rule || true
+  install_monitoring
+  expose_monitoring
+  finalize_installation
 }
 
 trap 'echo "[ERROR] Installation failed at line $LINENO"' ERR
