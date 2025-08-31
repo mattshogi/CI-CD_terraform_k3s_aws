@@ -119,8 +119,7 @@ jobs:
           ec=${PIPESTATUS[0]}
           echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
           if [ $ec -ne 0 ]; then
-            echo "[ERROR] terraform apply failed with exit code $ec" >&2
-            exit $ec
+            echo "[ERROR] terraform apply failed with exit code $ec (continuing for diagnostics)" >&2
           fi
 
       - name: Capture Outputs
@@ -287,6 +286,17 @@ jobs:
             extra-snapshot.txt
           if-no-files-found: warn
 
+      - name: Terraform Apply Log Snippet
+        if: always()
+        run: |
+          if [ -f terraform-apply.log ]; then
+            echo "---- BEGIN terraform-apply.log (last 120 lines) ----"
+            tail -n 120 terraform-apply.log || true
+            echo "---- END terraform-apply.log ----"
+          else
+            echo "terraform-apply.log missing"
+          fi
+
       - name: Terraform Destroy (ephemeral cleanup)
         if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply.outputs.apply_exit_code == '0' && steps.active-validate.outputs.validation_result == 'success')) }}
         working-directory: infra
@@ -304,10 +314,12 @@ jobs:
           echo "Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
           echo "Validation Result: ${{ steps.active-validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.apply.outputs.apply_exit_code }}" != "0" ]; then
-            echo "Terraform apply failed; see terraform-apply.log in diagnostics artifact." >> $GITHUB_STEP_SUMMARY
-            exit 1
+            echo "Terraform apply failed; see terraform-apply.log snippet above and full artifact." >> $GITHUB_STEP_SUMMARY
           fi
           if [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
             echo "Validation failed (see diagnostics artifact)." >> $GITHUB_STEP_SUMMARY
+          fi
+          # Final outcome exit code
+          if [ "${{ steps.apply.outputs.apply_exit_code }}" != "0" ] || [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
             exit 1
           fi
