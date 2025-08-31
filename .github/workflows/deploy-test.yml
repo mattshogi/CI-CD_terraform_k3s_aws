@@ -191,8 +191,9 @@ jobs:
         id: tf-out
         working-directory: infra
         run: |
-          echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT || echo "server_ip=UNKNOWN" >> $GITHUB_OUTPUT
-          echo "instance_id=$(terraform output -raw server_instance_id)" >> $GITHUB_OUTPUT || echo "instance_id=UNKNOWN" >> $GITHUB_OUTPUT
+          get_out() { key=$1; name=$2; val=$(terraform output -raw "$key" 2>/dev/null || true); val=$(printf "%s" "$val" | tr -d '\r' | head -n1 | sed 's/ /_/g'); if [ -z "$val" ]; then val=UNKNOWN; fi; echo "$name=$val" >> $GITHUB_OUTPUT; }
+          get_out server_public_ip server_ip
+          get_out server_instance_id instance_id
 
       - name: Echo Terraform outputs
         if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
@@ -284,6 +285,33 @@ jobs:
             echo "validation_result=failure" >> $GITHUB_OUTPUT
           else
             echo "validation_result=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Monitoring endpoints validation (Grafana/Prometheus)
+        id: monitoring_validate
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' && github.event.inputs.enable_monitoring == 'true' }}
+        continue-on-error: true
+        run: |
+          ip=${{ steps.tf-out.outputs.server_ip }}
+          echo "Validating monitoring NodePorts on $ip (Grafana:30030 Prometheus:30900)"
+          retries=40
+          sleep_between=10
+          success_graf=false
+            success_prom=false
+          for i in $(seq 1 $retries); do
+            code_graf=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30030/" || echo 000)
+            code_prom=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30900/" || echo 000)
+            echo "Attempt $i: Grafana=$code_graf Prometheus=$code_prom"
+            if [ "$code_graf" = "200" ]; then success_graf=true; fi
+            if [ "$code_prom" = "200" ]; then success_prom=true; fi
+            if [ "$success_graf" = true ] && [ "$success_prom" = true ]; then break; fi
+            sleep $sleep_between
+          done
+          echo "grafana_ok=$success_graf" >> $GITHUB_OUTPUT
+          echo "prometheus_ok=$success_prom" >> $GITHUB_OUTPUT
+          if [ "$success_graf" != true ] || [ "$success_prom" != true ]; then
+            echo "One or both monitoring endpoints not reachable (grafana=$success_graf prometheus=$success_prom)" >&2
+            exit 1
           fi
 
       - name: SSM in-cluster curl diagnostics (on validation failure)
@@ -420,6 +448,10 @@ jobs:
           echo "APPLY_OK: ${{ steps.apply_ok.outputs.apply_ok }}" >> $GITHUB_STEP_SUMMARY
           echo "Classification: ${{ steps.classify.outputs.classification || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
           echo "Validation Result: ${{ steps.active_validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event.inputs.enable_monitoring }}" = "true" ]; then
+            echo "Grafana OK: ${{ steps.monitoring_validate.outputs.grafana_ok || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
+            echo "Prometheus OK: ${{ steps.monitoring_validate.outputs.prometheus_ok || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
+          fi
           # Determine final success based on initial or retry apply
           final_code=${{ steps.apply.outputs.apply_exit_code }}
           if [ "${{ steps.apply_retry.outputs.apply_retry_exit_code || '1' }}" = "0" ]; then final_code=0; fi
