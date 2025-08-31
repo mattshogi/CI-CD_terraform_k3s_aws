@@ -151,8 +151,22 @@ jobs:
             echo "[INFO] retry terraform apply succeeded"
           fi
 
+      - name: Determine Final Apply Success
+        id: apply-final
+        run: |
+          init='${{ steps.apply.outputs.apply_exit_code }}'
+          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code }}'
+          [ -z "$init" ] && init=1
+          final=failure
+            if [ "$init" = "0" ]; then final=success; fi
+            if [ "$retry" = "0" ]; then final=success; fi
+          echo "initial_exit=$init" >> $GITHUB_OUTPUT
+          echo "retry_exit=${retry:-n/a}" >> $GITHUB_OUTPUT
+          echo "final=$final" >> $GITHUB_OUTPUT
+          echo "Apply initial exit: $init; retry exit: ${retry:-n/a}; final=$final"
+
       - name: Capture Outputs
-        if: ${{ steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0' }}
+        if: ${{ steps.apply-final.outputs.final == 'success' }}
         id: tf-out
         working-directory: infra
         run: |
@@ -160,19 +174,19 @@ jobs:
           echo "instance_id=$(terraform output -raw server_instance_id)" >> $GITHUB_OUTPUT || echo "instance_id=UNKNOWN" >> $GITHUB_OUTPUT
 
       - name: Echo Terraform outputs
-        if: ${{ steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0' }}
+        if: ${{ steps.apply-final.outputs.final == 'success' }}
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
 
       - name: Initial warm-up wait
-        if: ${{ steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0' }}
+        if: ${{ steps.apply-final.outputs.final == 'success' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           echo "Extended warm-up (120s) to allow k3s install + core pods (IP: $ip)"
           sleep 120
 
       - name: Poll k3s readiness via SSM
-        if: ${{ steps.detect.outputs.aws == 'true' && (steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0') }}
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply-final.outputs.final == 'success' }}
         id: k3s-ready
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
@@ -195,7 +209,7 @@ jobs:
           echo "Finished k3s readiness polling phase"
 
       - name: Poll k3s readiness marker (SSM)
-        if: ${{ steps.detect.outputs.aws == 'true' && (steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0') }}
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply-final.outputs.final == 'success' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Unknown instance id; skipping marker poll"; exit 0; fi
@@ -214,7 +228,7 @@ jobs:
       - name: Active endpoint validation (Ingress + NodePort)
         id: active-validate
         continue-on-error: true
-        if: ${{ steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0' }}
+        if: ${{ steps.apply-final.outputs.final == 'success' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           attempts=${{ github.event.inputs.readiness_attempts }}
@@ -330,7 +344,7 @@ jobs:
           fi
 
       - name: Terraform Destroy (ephemeral cleanup)
-        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || ((steps.apply.outputs.apply_exit_code == '0' || steps.apply_retry.outputs.apply_retry_exit_code == '0') && steps.active-validate.outputs.validation_result == 'success')) }}
+  if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply-final.outputs.final == 'success' && steps.active-validate.outputs.validation_result == 'success')) }}
         working-directory: infra
         run: terraform destroy -auto-approve
 
@@ -345,18 +359,19 @@ jobs:
           echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}" >> $GITHUB_STEP_SUMMARY
           echo "Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
           echo "Retry Apply Exit Code: ${{ steps.apply_retry.outputs.apply_retry_exit_code || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
+          echo "Final Apply Result: ${{ steps.apply-final.outputs.final }}" >> $GITHUB_STEP_SUMMARY
           echo "Classification: ${{ steps.classify.outputs.classification || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
           echo "Validation Result: ${{ steps.active-validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
           # Determine final success based on initial or retry apply
           final_code=${{ steps.apply.outputs.apply_exit_code }}
           if [ "${{ steps.apply_retry.outputs.apply_retry_exit_code || '1' }}" = "0" ]; then final_code=0; fi
-          if [ "$final_code" != "0" ]; then
+          if [ "${{ steps.apply-final.outputs.final }}" != "success" ]; then
             echo "Terraform apply (initial + retry) failed; see log artifact." >> $GITHUB_STEP_SUMMARY
           fi
           if [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
             echo "Validation failed (see diagnostics artifact)." >> $GITHUB_STEP_SUMMARY
           fi
           # Final outcome exit code
-          if [ "$final_code" != "0" ] || [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
+          if [ "${{ steps.apply-final.outputs.final }}" != "success" ] || [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
             exit 1
           fi
