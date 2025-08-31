@@ -285,7 +285,7 @@ resource "aws_iam_instance_profile" "k3s_ssm_profile" {
 # Delay to allow IAM role & instance profile propagation before launching instance (mitigates NoSuchEntity / InvalidIAMInstanceProfile race)
 resource "time_sleep" "iam_propagation_delay" {
   count           = var.enable_ssm ? 1 : 0
-  create_duration = "25s"
+  create_duration = "45s"
   depends_on      = [aws_iam_instance_profile.k3s_ssm_profile]
 }
 

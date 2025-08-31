@@ -174,8 +174,16 @@ jobs:
           echo "Checking EC2 limits..."
           aws ec2 describe-account-attributes --attribute-names supported-platforms --region ${{ env.AWS_REGION }} || true
           
+          # Check for existing resources that might conflict
+          echo "Checking for potential resource conflicts..."
+          echo "Existing security groups with 'gha-test' tag:"
+          aws ec2 describe-security-groups --region ${{ env.AWS_REGION }} --filters "Name=tag:Environment,Values=gha-test" --query 'SecurityGroups[*].[GroupId,GroupName]' --output table || true
+          echo "Existing IAM roles with 'gha-test' in name:"
+          aws iam list-roles --query 'Roles[?contains(RoleName, `gha-test`)].[RoleName,CreateDate]' --output table || true
+          
           # Start apply with timeout and enhanced logging
           echo "Starting Terraform apply with 8-minute timeout..."
+          echo "Expected resources: 6 (IAM role, instance profile, policy attachment, EC2 instance, security group, time_sleep)"
           set -o pipefail
           timeout 480 terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
           ec=${PIPESTATUS[0]}
@@ -185,6 +193,18 @@ jobs:
             echo "[ERROR] Terraform apply timed out after 8 minutes" >&2
           elif [ $ec -ne 0 ]; then 
             echo "[ERROR] Terraform apply failed with exit code: $ec" >&2
+            echo "Analyzing failure type..."
+            if grep -q "InvalidIAMInstanceProfile\|NoSuchEntity" ../terraform-apply.log; then
+              echo "IAM role/instance profile issue detected"
+            elif grep -q "InvalidKeyPair\|does not exist" ../terraform-apply.log; then
+              echo "SSH key issue detected"
+            elif grep -q "InvalidVpcID\|InvalidSubnetID" ../terraform-apply.log; then
+              echo "VPC/Subnet issue detected"
+            elif grep -q "UnauthorizedOperation" ../terraform-apply.log; then
+              echo "Permission issue detected"
+            else
+              echo "Unknown error type"
+            fi
           fi
           
           echo "Apply completed. Exit code: $ec"
