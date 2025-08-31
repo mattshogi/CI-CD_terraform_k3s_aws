@@ -99,6 +99,7 @@ jobs:
     name: Validate Terraform
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         terraform-dir: ['infra', 'infra/server'] # 'infra/agents' temporarily excluded (experimental)
     steps:
@@ -141,7 +142,15 @@ jobs:
 
       - name: Terraform Validate
         working-directory: ${{ matrix.terraform-dir }}
-        run: terraform validate
+        run: terraform validate -no-color | tee terraform-validate.out
+
+      - name: Upload Terraform Validate Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-validate-${{ matrix.terraform-dir }}
+          path: ${{ matrix.terraform-dir }}/terraform-validate.out
+          if-no-files-found: ignore
 
   # Validate Helm charts
   helm-validate:
