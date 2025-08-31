@@ -22,7 +22,7 @@ on:
       readiness_attempts:
         description: 'Number of validation attempts (10s interval)'
         required: false
-        default: '72'
+        default: '30'
       enable_monitoring:
         description: 'Install monitoring stack (true/false)'
         required: false
@@ -193,12 +193,12 @@ jobs:
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
 
-      - name: Initial warm-up wait
+      - name: Initial warm-up wait (reduced)
         if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
-          echo "Extended warm-up (120s) to allow k3s install + core pods (IP: $ip)"
-          sleep 120
+          echo "Reduced warm-up (60s) to allow k3s install + core pods (IP: $ip)"
+          sleep 60
 
       - name: Poll k3s readiness via SSM
         if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
@@ -269,11 +269,9 @@ jobs:
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           attempts=${{ github.event.inputs.readiness_attempts }}
-          echo "Initial grace period before first validation attempt (30s)"
-          sleep 30
-          echo "Running scripts/validate_endpoints.sh $ip $attempts 10"
+          echo "Running scripts/validate_endpoints.sh $ip $attempts 5"
           chmod +x scripts/validate_endpoints.sh || true
-          if ! scripts/validate_endpoints.sh "$ip" "$attempts" 10; then
+          if ! scripts/validate_endpoints.sh "$ip" "$attempts" 5; then
             echo "Endpoint validation did not succeed within given attempts" >&2
             echo "validation_result=failure" >> $GITHUB_OUTPUT
           else
@@ -286,9 +284,9 @@ jobs:
         continue-on-error: true
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
-          echo "Validating monitoring NodePorts on $ip (Grafana:30030 Prometheus:30900)"
-          retries=40
-          sleep_between=10
+          echo "Validating monitoring NodePorts on $ip (Grafana:30030 Prometheus:30900) with faster loop"
+          retries=24
+          sleep_between=5
           success_graf=false
             success_prom=false
           stability_needed=3
