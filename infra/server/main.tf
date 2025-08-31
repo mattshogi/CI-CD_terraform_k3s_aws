@@ -14,8 +14,8 @@ variable "environment" {
 }
 
 resource "aws_vpc" "main" {
-  cidr_block = "10.0.0.0/16"
-  enable_dns_support = true
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
   enable_dns_hostnames = true
   tags = {
     Name        = "k3s-vpc-${var.environment}"
@@ -115,7 +115,7 @@ resource "aws_security_group" "ec2_sg" {
 }
 
 resource "aws_network_acl" "public" {
-  vpc_id = aws_vpc.main.id
+  vpc_id     = aws_vpc.main.id
   subnet_ids = [aws_subnet.public.id]
 
   ingress {
@@ -137,10 +137,10 @@ resource "aws_network_acl" "public" {
 }
 
 resource "aws_instance" "k3s_server2" {
-  ami           = "ami-021589336d307b577" # Official Ubuntu 22.04 LTS AMI (2025-08-01)
-  instance_type = "t3.small"
-  subnet_id     = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+  ami                         = "ami-021589336d307b577" # Official Ubuntu 22.04 LTS AMI (2025-08-01)
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.public.id
+  vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   associate_public_ip_address = true
   # Use the same templated user_data approach as the primary module
   user_data = templatefile("${path.module}/../../cluster/user_data.tpl", {
@@ -151,9 +151,9 @@ resource "aws_instance" "k3s_server2" {
   })
   key_name = var.ssh_key_name
   tags = {
-  Name        = "k3s-server-${var.environment}"
-  Environment = var.environment
-  Project     = "k3s-demo"
+    Name        = "k3s-server-${var.environment}"
+    Environment = var.environment
+    Project     = "k3s-demo"
   }
 }
 
