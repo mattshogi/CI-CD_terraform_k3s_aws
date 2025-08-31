@@ -108,6 +108,7 @@ jobs:
         working-directory: infra
         run: |
           echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT || echo "server_ip=UNKNOWN" >> $GITHUB_OUTPUT
+          echo "instance_id=$(terraform output -raw server_instance_id)" >> $GITHUB_OUTPUT || echo "instance_id=UNKNOWN" >> $GITHUB_OUTPUT
 
       - name: Echo Terraform outputs
         run: |
@@ -120,6 +121,8 @@ jobs:
           sleep 60
 
       - name: Active endpoint validation (Ingress + NodePort)
+        id: active-validate
+        continue-on-error: true
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           attempts=${{ github.event.inputs.readiness_attempts }}
@@ -127,8 +130,9 @@ jobs:
           chmod +x scripts/validate_endpoints.sh || true
           if ! scripts/validate_endpoints.sh "$ip" "$attempts" 10; then
             echo "Endpoint validation did not succeed within given attempts" >&2
-            # Continue to diagnostics rather than fail immediately
-            exit 1
+            echo "validation_result=failure" >> $GITHUB_OUTPUT
+          else
+            echo "validation_result=success" >> $GITHUB_OUTPUT
           fi
 
       - name: Run endpoint validation script
@@ -157,6 +161,15 @@ jobs:
               ssh -i ~/.ssh/id_k3s_aws ubuntu@"$ip" "$cmd" || true;
             done > diagnostics.txt
 
+      - name: Fetch EC2 console output
+        if: always()
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          echo "Instance ID: $iid"
+          if [ "$iid" = "UNKNOWN" ]; then echo "Instance ID unknown, skipping console output"; exit 0; fi
+          aws ec2 get-console-output --instance-id "$iid" --latest --output text > console-output.txt 2>/dev/null || echo "(No console output yet)" > console-output.txt
+          ls -l console-output.txt
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v3
@@ -165,6 +178,7 @@ jobs:
           path: |
             infra/terraform.tfstate
             diagnostics.txt
+            console-output.txt
           if-no-files-found: warn
 
       - name: Terraform Destroy (ephemeral cleanup)
@@ -180,3 +194,9 @@ jobs:
           echo "Kept Resources: ${{ github.event.inputs.keep_resources }}" >> $GITHUB_STEP_SUMMARY
           echo "Instance Type: ${{ github.event.inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
           echo "Environment: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "Validation Result: ${{ steps.active-validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
+            echo "Validation failed (see diagnostics artifact)." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
