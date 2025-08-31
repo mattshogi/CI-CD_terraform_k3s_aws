@@ -271,13 +271,82 @@ jobs:
         run: |
           sudo apt-get update -y >/dev/null 2>&1 || true
           sudo apt-get install -y jq >/dev/null 2>&1 || true
-          out_json=$(terraform output -json || exit 1)
-          ip=$(echo "$out_json" | jq -r '.server_public_ip.value // empty')
-          iid=$(echo "$out_json" | jq -r '.server_instance_id.value // empty')
+          
+          echo "Attempting to capture Terraform outputs..."
+          
+          # First check if terraform state exists and has resources
+          echo "Checking Terraform state for created resources..."
+          if ! terraform state list >/dev/null 2>&1; then
+            echo "ERROR: No Terraform state found or state is empty"
+            echo "server_ip=UNKNOWN" >> $GITHUB_OUTPUT
+            echo "instance_id=UNKNOWN" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          terraform state list
+          if terraform state show aws_instance.k3s_server >/dev/null 2>&1; then
+            echo "k3s server instance found in state"
+          else
+            echo "WARNING: k3s server instance not found in state"
+            # List what we do have
+            echo "Available resources in state:"
+            terraform state list || true
+          fi
+          
+          # Try to get outputs with proper error handling
+          ip=""
+          iid=""
+          
+          # Method 1: JSON output with validation
+          echo "Trying terraform output -json..."
+          if terraform output >/dev/null 2>&1; then
+            echo "Terraform has outputs available"
+            if out_json=$(terraform output -json 2>&1); then
+              echo "Got terraform output, checking if it's valid JSON..."
+              if echo "$out_json" | jq -e '.' >/dev/null 2>&1; then
+                echo "JSON is valid, extracting values..."
+                ip=$(echo "$out_json" | jq -r '.server_public_ip.value // empty' 2>/dev/null || echo "")
+                iid=$(echo "$out_json" | jq -r '.server_instance_id.value // empty' 2>/dev/null || echo "")
+                echo "Extracted from JSON - IP: $ip, IID: $iid"
+              else
+                echo "Output is not valid JSON. Content:"
+                echo "$out_json" | head -c 500
+              fi
+            else
+              echo "terraform output -json failed"
+            fi
+          else
+            echo "terraform output command failed - no outputs defined or accessible"
+          fi
+          
+          # Method 2: Individual raw outputs
+          if [ -z "$ip" ] || [ "$ip" = "null" ] || [ -z "$iid" ] || [ "$iid" = "null" ]; then
+            echo "Trying individual terraform output commands..."
+            ip=$(terraform output -raw server_public_ip 2>/dev/null || echo "")
+            iid=$(terraform output -raw server_instance_id 2>/dev/null || echo "")
+            echo "Raw outputs - IP: $ip, IID: $iid"
+          fi
+          
+          # Method 3: Extract from state directly
+          if [ -z "$ip" ] || [ "$ip" = "null" ] || [ -z "$iid" ] || [ "$iid" = "null" ]; then
+            echo "Trying to extract from terraform state..."
+            if terraform state show aws_instance.k3s_server >/dev/null 2>&1; then
+              state_info=$(terraform state show aws_instance.k3s_server 2>/dev/null || echo "")
+              if [ -n "$state_info" ]; then
+                ip=$(echo "$state_info" | grep "public_ip" | head -1 | awk '{print $3}' | tr -d '"' || echo "")
+                iid=$(echo "$state_info" | grep "^id" | head -1 | awk '{print $3}' | tr -d '"' || echo "")
+                echo "State extraction - IP: $ip, IID: $iid"
+              fi
+            fi
+          fi
+          
+          # Set defaults if still empty
           [ -z "$ip" ] && ip=UNKNOWN
           [ -z "$iid" ] && iid=UNKNOWN
+          
           echo "server_ip=$ip" >> $GITHUB_OUTPUT
           echo "instance_id=$iid" >> $GITHUB_OUTPUT
+          echo "Final captured - IP: $ip, Instance ID: $iid"
 
       - name: Echo outputs
         if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
