@@ -107,9 +107,20 @@ jobs:
 
       - name: Terraform Apply
         working-directory: infra
-        run: terraform apply -auto-approve tfplan
+        id: apply
+        run: |
+          set -o pipefail
+          echo "[INFO] Applying terraform plan..."
+          terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
+          ec=${PIPESTATUS[0]}
+          echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
+          if [ $ec -ne 0 ]; then
+            echo "[ERROR] terraform apply failed with exit code $ec" >&2
+            exit $ec
+          fi
 
       - name: Capture Outputs
+        if: ${{ steps.apply.outputs.apply_exit_code == '0' }}
         id: tf-out
         working-directory: infra
         run: |
@@ -117,17 +128,19 @@ jobs:
           echo "instance_id=$(terraform output -raw server_instance_id)" >> $GITHUB_OUTPUT || echo "instance_id=UNKNOWN" >> $GITHUB_OUTPUT
 
       - name: Echo Terraform outputs
+        if: ${{ steps.apply.outputs.apply_exit_code == '0' }}
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
 
       - name: Initial warm-up wait
+        if: ${{ steps.apply.outputs.apply_exit_code == '0' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           echo "Extended warm-up (120s) to allow k3s install + core pods (IP: $ip)"
           sleep 120
 
       - name: Poll k3s readiness via SSM
-        if: steps.detect.outputs.aws == 'true'
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply.outputs.apply_exit_code == '0' }}
         id: k3s-ready
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
@@ -152,6 +165,7 @@ jobs:
       - name: Active endpoint validation (Ingress + NodePort)
         id: active-validate
         continue-on-error: true
+        if: ${{ steps.apply.outputs.apply_exit_code == '0' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           attempts=${{ github.event.inputs.readiness_attempts }}
@@ -235,6 +249,7 @@ jobs:
             diagnostics.txt
             console-output.txt
             ssm-diagnostics.txt
+            terraform-apply.log
           if-no-files-found: warn
 
       - name: Terraform Destroy (ephemeral cleanup)
@@ -251,7 +266,12 @@ jobs:
           echo "Instance Type: ${{ github.event.inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
           echo "Environment: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
           echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
           echo "Validation Result: ${{ steps.active-validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.apply.outputs.apply_exit_code }}" != "0" ]; then
+            echo "Terraform apply failed; see terraform-apply.log in diagnostics artifact." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
           if [ "${{ steps.active-validate.outputs.validation_result }}" != "success" ]; then
             echo "Validation failed (see diagnostics artifact)." >> $GITHUB_STEP_SUMMARY
             exit 1
