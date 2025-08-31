@@ -410,6 +410,18 @@ FALLBACK
   if command -v curl >/dev/null 2>&1; then
     curl -s -m 5 "http://127.0.0.1:${HELLO_NODE_PORT}/" | head -n1 || true
   fi
+  echo "[INFO] Capturing post-deploy diagnostic snapshot..."
+  {
+    echo "===== kubectl get nodes -o wide ====="; k3s kubectl get nodes -o wide || true;
+    echo "===== kubectl get pods -A -o wide ====="; k3s kubectl get pods -A -o wide || true;
+    echo "===== kubectl get svc -A ====="; k3s kubectl get svc -A || true;
+    echo "===== kubectl get ingress -A ====="; k3s kubectl get ingress -A || true;
+    echo "===== kubectl describe ingress hello-world -n hello-world ====="; k3s kubectl describe ingress hello-world -n hello-world || true;
+    echo "===== kubectl get ep -n hello-world hello-world -o yaml ====="; k3s kubectl get ep -n hello-world hello-world -o yaml || true;
+    echo "===== iptables -t nat -L KUBE-NODEPORTS -n -v ====="; iptables -t nat -L KUBE-NODEPORTS -n -v 2>/dev/null || true;
+    echo "===== ss -tnlp | grep ${HELLO_NODE_PORT} (expect no direct listener; NodePort is iptables) ====="; ss -tnlp | grep ":${HELLO_NODE_PORT}" || true;
+  } > /var/log/k3s_diagnostics_hello_world.txt 2>&1 || true
+  echo "[INFO] Diagnostics written to /var/log/k3s_diagnostics_hello_world.txt"
 }
 
 finalize_installation() {
