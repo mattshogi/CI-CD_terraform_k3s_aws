@@ -205,20 +205,14 @@ jobs:
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ "$iid" = "UNKNOWN" ]; then echo "Instance ID unknown, skipping SSM diagnostics"; exit 0; fi
           echo "Sending SSM diagnostics command to $iid"
+          # Build JSON parameters for AWS-RunShellScript (array of commands executed sequentially)
+          JSON_B64=$(printf '%s' '{"commands":["set -x","echo \"===== tail cloud-init-output.log (400 lines) =====\"; tail -n 400 /var/log/cloud-init-output.log 2>&1 || true","if [ -f /var/log/k3s_diagnostics_hello_world.txt ]; then echo \"===== k3s_diagnostics_hello_world.txt (200 lines) =====\"; tail -n 200 /var/log/k3s_diagnostics_hello_world.txt; fi","echo \"===== kubectl get nodes -o wide =====\"; sudo k3s kubectl get nodes -o wide 2>&1 || true","echo \"===== kubectl get pods -A -o wide =====\"; sudo k3s kubectl get pods -A -o wide 2>&1 || true","echo \"===== kubectl get svc -A =====\"; sudo k3s kubectl get svc -A 2>&1 || true","echo \"===== kubectl get ingress -A =====\"; sudo k3s kubectl get ingress -A 2>&1 || true","echo \"===== kubectl describe ingress hello-world -n hello-world =====\"; sudo k3s kubectl describe ingress hello-world -n hello-world 2>&1 || true"]}' | base64 -w0 2>/dev/null || base64)
+          echo "$JSON_B64" | base64 -d > params.json 2>/dev/null || echo "$JSON_B64" | base64 --decode > params.json
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$iid" \
             --document-name AWS-RunShellScript \
             --comment "Collect k3s diagnostics" \
-            --parameters commands='#!/bin/bash
-            set -x
-            echo "===== tail cloud-init-output.log (400 lines) ====="; tail -n 400 /var/log/cloud-init-output.log 2>&1 || true;
-            if [ -f /var/log/k3s_diagnostics_hello_world.txt ]; then echo "===== k3s_diagnostics_hello_world.txt (200 lines) ====="; tail -n 200 /var/log/k3s_diagnostics_hello_world.txt; fi;
-            echo "===== kubectl get nodes -o wide ====="; sudo k3s kubectl get nodes -o wide 2>&1 || true;
-            echo "===== kubectl get pods -A -o wide ====="; sudo k3s kubectl get pods -A -o wide 2>&1 || true;
-            echo "===== kubectl get svc -A ====="; sudo k3s kubectl get svc -A 2>&1 || true;
-            echo "===== kubectl get ingress -A ====="; sudo k3s kubectl get ingress -A 2>&1 || true;
-            echo "===== kubectl describe ingress hello-world -n hello-world ====="; sudo k3s kubectl describe ingress hello-world -n hello-world 2>&1 || true;
-            ' \
+            --parameters file://params.json \
             --query 'Command.CommandId' --output text)
           echo "Command ID: $CMD_ID"
           # Poll status
