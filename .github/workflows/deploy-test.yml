@@ -92,6 +92,10 @@ jobs:
           SSH_KEY_VAR=""
           if [ -n "${{ secrets.AWS_SSH_KEY_NAME }}" ]; then
             SSH_KEY_VAR="-var=ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME }}"
+            echo "Using SSH key from secrets: ${{ secrets.AWS_SSH_KEY_NAME }}"
+          else
+            SSH_KEY_VAR="-var=ssh_key_name=id_k3s_aws"
+            echo "Using default SSH key: id_k3s_aws"
           fi
           
           echo "=== TERRAFORM PLAN DEBUGGING ==="
@@ -142,6 +146,16 @@ jobs:
           echo "Testing IAM permissions..."
           aws ec2 describe-security-groups --region ${{ env.AWS_REGION }} --max-items 1 || echo "EC2 describe-security-groups failed"
           aws iam list-roles --max-items 1 || echo "IAM list-roles failed"
+          
+          # Check SSH key availability
+          echo "Checking SSH key availability..."
+          if [ -n "${{ secrets.AWS_SSH_KEY_NAME }}" ]; then
+            echo "SSH key name from secrets: ${{ secrets.AWS_SSH_KEY_NAME }}"
+            aws ec2 describe-key-pairs --key-names "${{ secrets.AWS_SSH_KEY_NAME }}" --region ${{ env.AWS_REGION }} || echo "SSH key '${{ secrets.AWS_SSH_KEY_NAME }}' not found"
+          else
+            echo "No AWS_SSH_KEY_NAME secret provided - will deploy without SSH key"
+          fi
+          aws ec2 describe-key-pairs --region ${{ env.AWS_REGION }} --query 'KeyPairs[*].KeyName' --output table || echo "Failed to list available keys"
           
           # Check EC2 limits
           echo "Checking EC2 limits..."
