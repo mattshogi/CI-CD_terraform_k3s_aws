@@ -7,16 +7,32 @@ variable "ssh_key_name" {
   type        = string
 }
 
+variable "environment" {
+  description = "Deployment environment (e.g. dev, staging, production)"
+  type        = string
+  default     = "dev"
+}
+
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
   enable_dns_support = true
   enable_dns_hostnames = true
+  tags = {
+    Name        = "k3s-vpc-${var.environment}"
+    Environment = var.environment
+    Project     = "k3s-demo"
+  }
 }
 
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
+  tags = {
+    Name        = "k3s-public-subnet-${var.environment}"
+    Environment = var.environment
+    Project     = "k3s-demo"
+  }
 }
 
 resource "aws_internet_gateway" "igw" {
@@ -91,6 +107,11 @@ resource "aws_security_group" "ec2_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  tags = {
+    Name        = "k3s-sg-${var.environment}"
+    Environment = var.environment
+    Project     = "k3s-demo"
+  }
 }
 
 resource "aws_network_acl" "public" {
@@ -124,7 +145,9 @@ resource "aws_instance" "k3s_server2" {
   user_data = file("${path.module}/../../user_data.sh")
   key_name = var.ssh_key_name
   tags = {
-    Name = "k3s-server"
+  Name        = "k3s-server-${var.environment}"
+  Environment = var.environment
+  Project     = "k3s-demo"
   }
 }
 

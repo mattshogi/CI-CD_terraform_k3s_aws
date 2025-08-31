@@ -1,0 +1,149 @@
+name: Ephemeral Deploy Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: EC2 instance type
+        required: false
+        default: t3.micro
+      keep_resources:
+        description: 'Keep resources after test (true/false)'
+        required: false
+        default: 'false'
+      k3s_node_count:
+        description: 'Number of agent nodes'
+        required: false
+        default: '0'
+      environment:
+        description: 'Environment tag (for resource naming)'
+        required: false
+        default: 'gha-test'
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: 1
+  AWS_REGION: us-east-1
+  TERRAFORM_CLI_ARGS: -no-color
+  # HAS_SSH_KEY will be set dynamically by a step
+
+jobs:
+  deploy-validate-destroy:
+    name: Provision → Validate → (Destroy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect secrets
+        id: detect
+        run: |
+          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then echo "HAS_SSH_KEY=true" >> $GITHUB_ENV; fi
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "HAS_AWS_CREDS=true" >> $GITHUB_ENV; else echo "HAS_AWS_CREDS=false" >> $GITHUB_ENV; fi
+
+      - name: Configure AWS credentials
+        if: env.HAS_AWS_CREDS == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Prepare SSH key (optional validation via SSH)
+        if: env.HAS_SSH_KEY == 'true'
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_k3s_aws
+          chmod 600 ~/.ssh/id_k3s_aws
+          printf "Host *\n  StrictHostKeyChecking no\n" > ~/.ssh/config
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ~1.0
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: infra
+        run: |
+          terraform plan \
+            -var="ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME }}" \
+            -var="instance_type=${{ github.event.inputs.instance_type }}" \
+            -var="k3s_node_count=${{ github.event.inputs.k3s_node_count }}" \
+            -var="environment=${{ github.event.inputs.environment || 'gha-test' }}" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: terraform apply -auto-approve tfplan
+
+      - name: Capture Outputs
+        id: tf-out
+        working-directory: infra
+        run: |
+          echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT || echo "server_ip=UNKNOWN" >> $GITHUB_OUTPUT
+
+      - name: Wait for k3s bootstrap
+        run: |
+          ip=${{ steps.tf-out.outputs.server_ip }}
+          echo "Target IP: $ip"
+          echo "Waiting up to 12 minutes for HTTP readiness..."
+          for i in $(seq 1 72); do
+            if curl -fsS --max-time 5 "http://$ip/" | grep -qi 'Hello'; then
+              echo "Application responding."; exit 0; fi
+            sleep 10
+          done
+          echo "Timed out waiting for application endpoint" >&2
+          exit 1
+
+      - name: Run endpoint validation script
+        run: |
+          chmod +x scripts/validate_endpoints.sh || true
+          scripts/validate_endpoints.sh ${{ steps.tf-out.outputs.server_ip }} || echo "Endpoint script returned non-zero (continuing to collect diagnostics)"
+
+      - name: Optional SSH diagnostics
+        if: env.HAS_SSH_KEY == 'true'
+        continue-on-error: true
+        run: |
+          ip=${{ steps.tf-out.outputs.server_ip }}
+          echo "Collecting remote diagnostics from $ip"
+          for cmd in \
+            "sudo systemctl status k3s --no-pager" \
+            "sudo journalctl -u k3s -n 200 --no-pager" \
+            "sudo ls -l /var/log" \
+            "sudo tail -n 100 /var/log/cloud-init-output.log" \
+            "sudo k3s kubectl get pods -A"; do
+              echo "===== $cmd =====";
+              ssh -i ~/.ssh/id_k3s_aws ubuntu@"$ip" "$cmd" || true;
+            done > diagnostics.txt
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: deploy-test-diagnostics
+          path: |
+            infra/terraform.tfstate
+            diagnostics.txt
+          if-no-files-found: warn
+
+      - name: Terraform Destroy (ephemeral cleanup)
+        if: always() && github.event.inputs.keep_resources != 'true'
+        working-directory: infra
+        run: terraform destroy -auto-approve
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Deploy Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "Instance IP: ${{ steps.tf-out.outputs.server_ip }}" >> $GITHUB_STEP_SUMMARY
+          echo "Kept Resources: ${{ github.event.inputs.keep_resources }}" >> $GITHUB_STEP_SUMMARY
+          echo "Instance Type: ${{ github.event.inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
