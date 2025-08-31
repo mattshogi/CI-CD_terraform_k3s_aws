@@ -160,8 +160,8 @@ wait_for_traefik() {
   local waited=0
   while true; do
     # Try multiple label selectors seen in k3s distributions
-    ready_count=$(k3s kubectl get pods -n kube-system -l app=traefik --no-headers 2>/dev/null | awk '$2 ~ /1\/1/ {c++} END{print c+0}')
-    total_count=$(k3s kubectl get pods -n kube-system -l app=traefik --no-headers 2>/dev/null | wc -l || echo 0)
+    ready_count=$(k3s kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik --no-headers 2>/dev/null | awk '$2 ~ /1\/1/ {c++} END{print c+0}')
+    total_count=$(k3s kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik --no-headers 2>/dev/null | wc -l || echo 0)
     if [ "$total_count" -gt 0 ] && [ "$ready_count" -eq "$total_count" ]; then
       echo "[INFO] Traefik pods Ready ($ready_count/$total_count)"
       break
@@ -233,6 +233,10 @@ install_monitoring() {
     --namespace monitoring \
     --create-namespace \
     --set grafana.adminPassword=admin \
+    --set prometheus.service.nodePort=30900 \
+    --set prometheus.service.type=NodePort \
+    --set grafana.service.nodePort=30030 \
+    --set grafana.service.type=NodePort \
     --wait --timeout 15m || {
       echo "[WARN] Monitoring installation failed, continuing without monitoring"
       return 0
@@ -564,6 +568,7 @@ main() {
   install_k3s
   wait_for_core_components
   wait_for_traefik
+  install_helm
   setup_helm_repos
   install_ingress
   deploy_hello_world
