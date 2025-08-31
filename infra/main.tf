@@ -81,8 +81,8 @@ variable "resource_name_suffix" {
 }
 
 locals {
-  sg_base = var.vpc_id != "" ? "ec2_sg-${substr(var.vpc_id, -4, 4)}" : "ec2_sg"
-  sg_name = var.resource_name_suffix != "" ? "${local.sg_base}-${var.resource_name_suffix}" : local.sg_base
+  sg_base          = var.vpc_id != "" ? "ec2_sg-${substr(var.vpc_id, -4, 4)}" : "ec2_sg"
+  sg_name          = var.resource_name_suffix != "" ? "${local.sg_base}-${var.resource_name_suffix}" : local.sg_base
   iam_role_name    = var.resource_name_suffix != "" ? "k3s-ssm-role-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-role-${var.environment}"
   iam_profile_name = var.resource_name_suffix != "" ? "k3s-ssm-profile-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-profile-${var.environment}"
 }
