@@ -11,6 +11,15 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      destroy_staging:
+        description: "Run terraform destroy for staging after validation"
+        required: false
+        default: "false"
+      destroy_production:
+        description: "Run terraform destroy for production after validation"
+        required: false
+        default: "false"
 
 env:
   REGISTRY: ghcr.io
@@ -364,3 +373,47 @@ jobs:
         run: |
           echo "✅ Production deployment validation completed"
           echo "🎉 Production deployment ready!"
+
+  destroy-staging:
+    name: Destroy Staging (Optional)
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.event_name == 'workflow_dispatch' && inputs.destroy_staging == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.9.5
+      - name: Terraform Destroy (Staging)
+        working-directory: infra
+        env:
+          TF_VAR_environment: staging
+        run: |
+          terraform init -backend=false
+          terraform destroy -auto-approve \
+            -var="ssh_key_name=dummy-key" \
+            -var="instance_type=t3.micro" \
+            -var="environment=staging"
+
+  destroy-production:
+    name: Destroy Production (Optional)
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.event_name == 'workflow_dispatch' && inputs.destroy_production == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.9.5
+      - name: Terraform Destroy (Production)
+        working-directory: infra
+        env:
+          TF_VAR_environment: production
+        run: |
+          terraform init -backend=false
+          terraform destroy -auto-approve \
+            -var="ssh_key_name=production-key" \
+            -var="instance_type=t3.small" \
+            -var="environment=production"
