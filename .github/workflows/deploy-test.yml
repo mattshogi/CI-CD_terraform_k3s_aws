@@ -102,6 +102,7 @@ jobs:
             -var="environment=${{ github.event.inputs.environment || 'gha-test' }}" \
             -var="enable_monitoring=${{ github.event.inputs.enable_monitoring == 'true' }}" \
             -var="install_docker=${{ github.event.inputs.install_docker == 'true' }}" \
+            -var="resource_name_suffix=${{ github.run_id }}" \
             -out=tfplan
 
       - name: Terraform Apply
