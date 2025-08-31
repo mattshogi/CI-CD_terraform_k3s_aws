@@ -31,6 +31,10 @@ on:
         description: 'Install Docker engine (true/false)'
         required: false
         default: 'false'
+      keep_on_failure:
+        description: 'Do not destroy resources if apply or validation fails (for debugging)'
+        required: false
+        default: 'false'
 
 concurrency:
   group: deploy-test
@@ -162,6 +166,23 @@ jobs:
           # Final note (can't re-read step output easily in script without context parsing)
           echo "Finished k3s readiness polling phase"
 
+      - name: Poll k3s readiness marker (SSM)
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply.outputs.apply_exit_code == '0' }}
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Unknown instance id; skipping marker poll"; exit 0; fi
+          echo "Polling for /tmp/k3s-ready marker (timeout 6 min)"
+          deadline=$((SECONDS+360))
+          while [ $SECONDS -lt $deadline ]; do
+            CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='test -f /tmp/k3s-ready && echo READY || echo NOT_READY' --query 'Command.CommandId' --output text || true)
+            sleep 5
+            out=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text 2>/dev/null || true)
+            echo "Marker status: $out"
+            if echo "$out" | grep -q READY; then echo "Marker detected"; exit 0; fi
+            sleep 10
+          done
+          echo "Marker not detected within timeout"
+
       - name: Active endpoint validation (Ingress + NodePort)
         id: active-validate
         continue-on-error: true
@@ -169,6 +190,8 @@ jobs:
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           attempts=${{ github.event.inputs.readiness_attempts }}
+          echo "Initial grace period before first validation attempt (30s)"
+          sleep 30
           echo "Running scripts/validate_endpoints.sh $ip $attempts 10"
           chmod +x scripts/validate_endpoints.sh || true
           if ! scripts/validate_endpoints.sh "$ip" "$attempts" 10; then
@@ -239,6 +262,17 @@ jobs:
           aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > ssm-diagnostics.txt 2>/dev/null || echo "(No SSM output)" > ssm-diagnostics.txt
           echo "SSM diagnostics captured (size $(wc -c < ssm-diagnostics.txt) bytes)"
 
+      - name: Extra cloud-init & k3s status snapshot
+        if: ${{ always() && steps.detect.outputs.aws == 'true' }}
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          [ -z "$iid" ] && echo "No instance id for snapshot" && exit 0
+          echo "Collecting additional snapshot via SSM single command"
+          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "==== systemctl status k3s (may fail early) ===="; sudo systemctl status k3s --no-pager 2>&1 || true; echo "==== ps aux | grep k3s server ===="; ps aux | grep k3s | grep -v grep || true; echo "==== tail -n 120 /var/log/cloud-init-output.log ===="; tail -n 120 /var/log/cloud-init-output.log 2>&1 || true;' --query 'Command.CommandId' --output text || true)
+          sleep 6
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > extra-snapshot.txt 2>/dev/null || true
+          echo "Extra snapshot captured (size $(wc -c < extra-snapshot.txt 2>/dev/null || echo 0) bytes)"
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -250,10 +284,11 @@ jobs:
             console-output.txt
             ssm-diagnostics.txt
             terraform-apply.log
+            extra-snapshot.txt
           if-no-files-found: warn
 
       - name: Terraform Destroy (ephemeral cleanup)
-        if: always() && github.event.inputs.keep_resources != 'true'
+        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply.outputs.apply_exit_code == '0' && steps.active-validate.outputs.validation_result == 'success')) }}
         working-directory: infra
         run: terraform destroy -auto-approve
 
