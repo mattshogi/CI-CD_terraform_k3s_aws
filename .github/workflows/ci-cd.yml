@@ -25,6 +25,10 @@ jobs:
           raw="${{ matrix.terraform-dir }}"
           safe="${raw//\//-}"
           echo "sanitized=$safe" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Export sanitized dir env
+        run: echo "SANITIZED_DIR=${{ steps.dir_meta.outputs.sanitized }}" >> $GITHUB_ENV
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -143,9 +147,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tflint-${{ steps.dir_meta.outputs.sanitized }}
+          name: tflint-${{ matrix.terraform-dir == 'infra/server' && 'infra-server' || 'infra' }}-${{ github.run_attempt }}
           path: ${{ matrix.terraform-dir }}/tflint.out
           if-no-files-found: ignore
+          overwrite: true
 
       - name: Terraform Validate
         working-directory: ${{ matrix.terraform-dir }}
@@ -169,9 +174,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-validate-${{ steps.dir_meta.outputs.sanitized }}
+          name: terraform-validate-${{ matrix.terraform-dir == 'infra/server' && 'infra-server' || 'infra' }}-${{ github.run_attempt }}
           path: ${{ matrix.terraform-dir }}/terraform-validate.out
           if-no-files-found: ignore
+          overwrite: true
 
   # Validate Helm charts
   helm-validate:
