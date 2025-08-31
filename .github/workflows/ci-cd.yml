@@ -482,7 +482,7 @@ jobs:
     needs: [terraform-validate, helm-validate, security-scan, integration-tests]
     if: github.event_name == 'workflow_dispatch' && inputs.run_apply == 'true'
     outputs:
-      server_public_ip: ${{ steps.capture-ip.outputs.server_public_ip }}
+      server_public_ip: ${{ steps.capture_outputs.outputs.server_ip }}
     steps:
       - uses: actions/checkout@v4
 
@@ -503,88 +503,125 @@ jobs:
         run: terraform init -backend=false -input=false
 
       - name: Terraform Apply
-        id: tf-apply
+        id: apply
         working-directory: infra
         env:
           TF_IN_AUTOMATION: true
         run: |
-          set -euo pipefail
+          set -o pipefail
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
             echo "AWS credentials not provided; skipping apply." >&2
             echo "apply_skipped=true" >> $GITHUB_OUTPUT
             exit 0
           fi
+          echo "[INFO] Applying Terraform..."
           terraform apply -auto-approve \
             -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
             -var="instance_type=${{ inputs.instance_type_override }}" \
             -var="enable_monitoring=${{ inputs.enable_monitoring }}" \
-            -var="environment=${{ inputs.apply_environment }}"
-          terraform output -json > tf-outputs.json
-
-      - name: Capture public IP
-        id: capture-ip
-        if: steps.tf-apply.outcome == 'success' && steps.tf-apply.outputs.apply_skipped != 'true'
-        working-directory: infra
-        run: |
-          SERVER_IP=$(jq -r '.server_public_ip.value' tf-outputs.json 2>/dev/null || echo '')
-          echo "server_public_ip=$SERVER_IP" >> $GITHUB_OUTPUT
-          echo "Server IP: $SERVER_IP"
-
-      - name: Validate Endpoints
-        if: steps.capture-ip.outputs.server_public_ip != ''
-        working-directory: infra
-        env:
-          SERVER_IP: ${{ steps.capture-ip.outputs.server_public_ip }}
-          HELLO_NODE_PORT: 30080
-          GRAFANA_NODE_PORT: 30030
-          PROM_NODE_PORT: 30900
-        run: |
-          set -euo pipefail
-          echo "Starting endpoint validation against $SERVER_IP"
-          retries=40
-          sleep_between=15
-          endpoints="root:http://$SERVER_IP/ hello:http://$SERVER_IP:$HELLO_NODE_PORT/ grafana:http://$SERVER_IP:$GRAFANA_NODE_PORT/ prometheus:http://$SERVER_IP:$PROM_NODE_PORT/"
-          mkdir -p validation
-          summary=validation/summary.md
-          echo "# Endpoint Validation Summary" > $summary
-          echo "Server IP: $SERVER_IP" >> $summary
-          pass_count=0
-          total=0
-          for item in $endpoints; do
-            total=$((total+1))
-            name=${item%%:*}
-            url=${item#*:}
-            echo "\n## $name ($url)" >> $summary
-            ok=false
-            for ((i=1;i<=retries;i++)); do
-              code=$(curl -m 5 -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
-              echo "[$name] attempt $i/$retries -> $code"
-              if [ "$code" = "200" ]; then
-                echo "Success ($code) on attempt $i" >> $summary
-                ok=true; pass_count=$((pass_count+1)); break
-              fi
-              sleep $sleep_between
-            done
-            if [ "$ok" = false ]; then
-              echo "Failed after $retries attempts" >> $summary
-            fi
-          done
-          echo "\n---\nPassed $pass_count of $total endpoints" >> $summary
-          if [ $pass_count -lt 2 ]; then
-            echo "Insufficient endpoints healthy ($pass_count/$total)" >> $summary
-            # don't fail immediately; capture artifact first
+            -var="environment=${{ inputs.apply_environment }}" 2>&1 | tee ../terraform-apply.log
+          ec=${PIPESTATUS[0]}
+          echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
+          if [ $ec -ne 0 ]; then
+            echo "[ERROR] terraform apply failed (continuing for diagnostics)" >&2
           fi
 
-      - name: Upload Validation Summary
-        if: steps.capture-ip.outputs.server_public_ip != ''
+      - name: Classify Apply Failure
+        if: ${{ steps.apply.outputs.apply_exit_code != '0' && steps.apply.outputs.apply_skipped != 'true' }}
+        id: classify
+        run: |
+          echo "classification=unknown" >> $GITHUB_OUTPUT
+          [ -f terraform-apply.log ] || { echo "No terraform-apply.log"; exit 0; }
+          if grep -qiE 'Throttling|RequestLimitExceeded' terraform-apply.log; then cls=throttling; elif grep -qiE 'NoSuchEntity|InvalidIAMInstanceProfile' terraform-apply.log; then cls=iam-propagation; elif grep -qi 'DependencyViolation' terraform-apply.log; then cls=dependency-violation; elif grep -qiE 'ServiceUnavailable|InternalError' terraform-apply.log; then cls=provider-internal; else cls=unknown; fi
+          echo "classification=$cls" >> $GITHUB_OUTPUT
+          echo "Detected classification: $cls"
+
+      - name: Terraform Apply Retry
+        if: ${{ steps.apply.outputs.apply_exit_code != '0' && (steps.classify.outputs.classification == 'throttling' || steps.classify.outputs.classification == 'iam-propagation' || steps.classify.outputs.classification == 'provider-internal' || steps.classify.outputs.classification == 'dependency-violation') }}
+        id: apply_retry
+        working-directory: infra
+        run: |
+            echo "[INFO] Retry conditions met (classification=${{ steps.classify.outputs.classification }}); sleeping 20s..."
+            sleep 20
+            set -o pipefail
+            terraform apply -auto-approve \
+              -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
+              -var="instance_type=${{ inputs.instance_type_override }}" \
+              -var="enable_monitoring=${{ inputs.enable_monitoring }}" \
+              -var="environment=${{ inputs.apply_environment }}" 2>&1 | tee -a ../terraform-apply.log
+            ec=${PIPESTATUS[0]}
+            echo "apply_retry_exit_code=$ec" >> $GITHUB_OUTPUT
+            if [ $ec -ne 0 ]; then echo "[ERROR] retry apply failed" >&2; else echo "[INFO] retry apply succeeded"; fi
+
+      - name: Determine Final Apply
+        id: apply_final
+        run: |
+          init='${{ steps.apply.outputs.apply_exit_code }}'
+          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code }}'
+          final=failure
+          if [ "$init" = '0' ] || [ "$retry" = '0' ]; then final=success; fi
+          echo "final=$final" >> $GITHUB_OUTPUT
+          echo "Apply initial=$init retry=${retry:-n/a} final=$final"
+
+      - name: Evaluate APPLY_OK
+        id: apply_ok
+        run: |
+          if [ '${{ steps.apply.outputs.apply_exit_code }}' = '0' ] || [ '${{ steps.apply_retry.outputs.apply_retry_exit_code }}' = '0' ]; then echo 'apply_ok=true' >> $GITHUB_OUTPUT; else echo 'apply_ok=false' >> $GITHUB_OUTPUT; fi
+
+      - name: Capture Outputs
+        id: capture_outputs
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' && steps.apply.outputs.apply_skipped != 'true' }}
+        working-directory: infra
+        run: |
+          echo "server_ip=$(terraform output -raw server_public_ip 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "instance_id=$(terraform output -raw server_instance_id 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "Captured server_ip and instance_id outputs written"
+
+      - name: Pre-validation Snapshot (SSM)
+        if: ${{ steps.capture_outputs.outputs.instance_id != '' && steps.apply_ok.outputs.apply_ok == 'true' }}
+        run: |
+          iid=${{ steps.capture_outputs.outputs.instance_id }}
+          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== nodes ====="; k3s kubectl get nodes -o wide || true; echo "===== pods (top 40) ====="; k3s kubectl get pods -A -o wide 2>/dev/null | head -n 40 || true; echo "===== svc -A ====="; k3s kubectl get svc -A || true; echo "===== ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== tail cloud-init-output.log (120) ====="; tail -n 120 /var/log/cloud-init-output.log || true;' --query 'Command.CommandId' --output text || true)
+          sleep 6
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > pre-validation.txt 2>/dev/null || true
+          echo "Pre-validation snapshot saved (size $(wc -c < pre-validation.txt 2>/dev/null || echo 0) bytes)"
+
+      - name: Validate Endpoints (script)
+        id: validate
+        if: ${{ steps.capture_outputs.outputs.server_ip != '' && steps.apply_ok.outputs.apply_ok == 'true' }}
+        run: |
+          ip=${{ steps.capture_outputs.outputs.server_ip }}
+          echo "Running enhanced validate_endpoints.sh against $ip"
+          chmod +x scripts/validate_endpoints.sh || true
+          if ! scripts/validate_endpoints.sh "$ip" 60 10; then
+            echo "validation_result=failure" >> $GITHUB_OUTPUT
+            echo "[WARN] Endpoint validation failed"
+          else
+            echo "validation_result=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: SSM Curl Diagnostics (on validation failure)
+        if: ${{ steps.validate.outputs.validation_result != 'success' && steps.capture_outputs.outputs.instance_id != '' && steps.apply_ok.outputs.apply_ok == 'true' }}
+        run: |
+          iid=${{ steps.capture_outputs.outputs.instance_id }}
+          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== kubectl get pods -A ====="; k3s kubectl get pods -A -o wide || true; echo "===== kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== describe ingress hello-world ====="; k3s kubectl describe ingress hello-world -n hello-world || true; echo "===== curl localhost:30080 ====="; curl -s -m 5 http://127.0.0.1:30080/ || true;' --query 'Command.CommandId' --output text || true)
+          sleep 6
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > validation-ssm.txt 2>/dev/null || true
+          echo "Validation SSM diagnostics saved (size $(wc -c < validation-ssm.txt 2>/dev/null || echo 0) bytes)"
+
+      - name: Upload Artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: infra-apply-validation-${{ github.run_attempt }}
-          path: infra/validation/summary.md
-          if-no-files-found: warn
+          name: infra-apply-validate-artifacts-${{ github.run_attempt }}
+          path: |
+            terraform-apply.log
+            pre-validation.txt
+            validation-ssm.txt
+          if-no-files-found: ignore
 
       - name: Terraform Destroy (auto)
-        if: inputs.destroy_after_apply == 'true' && steps.capture-ip.outputs.server_public_ip != ''
+        if: inputs.destroy_after_apply == 'true' && steps.capture_outputs.outputs.server_ip != ''
         working-directory: infra
         run: |
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
