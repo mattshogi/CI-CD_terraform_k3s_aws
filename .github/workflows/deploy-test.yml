@@ -55,6 +55,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+
       - name: Detect secrets
         id: detect
         run: |
@@ -120,6 +121,9 @@ jobs:
           echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
           if [ $ec -ne 0 ]; then
             echo "[ERROR] terraform apply failed with exit code $ec (continuing for diagnostics)" >&2
+            echo "---- BEGIN terraform-apply.log (last 120 lines) immediate snippet ----" >&2
+            tail -n 120 ../terraform-apply.log || true
+            echo "---- END terraform-apply.log immediate snippet ----" >&2
           fi
 
       - name: Classify Terraform Apply Failure
@@ -253,6 +257,17 @@ jobs:
           aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > pre-validation-snapshot.txt 2>/dev/null || true
           echo "Pre-validation snapshot captured (size $(wc -c < pre-validation-snapshot.txt 2>/dev/null || echo 0) bytes)"
 
+      - name: Fetch monitoring exposure log (SSM)
+        if: ${{ always() && steps.detect.outputs.aws == 'true' && steps.tf-out.outputs.instance_id != '' }}
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          [ -z "$iid" ] && echo "No instance id for monitoring log" && exit 0
+          echo "Attempting to retrieve /var/log/k3s_monitoring_expose.log via SSM"
+          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='if [ -f /var/log/k3s_monitoring_expose.log ]; then echo "===== k3s_monitoring_expose.log ====="; tail -n 400 /var/log/k3s_monitoring_expose.log; else echo "(monitoring exposure log not present)"; fi' --query 'Command.CommandId' --output text || true)
+          sleep 6
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > monitoring-expose.log 2>/dev/null || echo "(no monitoring log content)" > monitoring-expose.log
+          echo "Monitoring exposure log captured (size $(wc -c < monitoring-expose.log 2>/dev/null || echo 0) bytes)"
+
       - name: Active endpoint validation (Ingress + NodePort)
         id: active_validate
         continue-on-error: true
@@ -367,6 +382,8 @@ jobs:
             terraform-apply.log
             extra-snapshot.txt
             validation-ssm-curl.txt
+            pre-validation-snapshot.txt
+            monitoring-expose.log
           if-no-files-found: warn
 
       - name: Terraform Apply Log Snippet
