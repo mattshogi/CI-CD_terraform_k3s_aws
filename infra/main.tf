@@ -209,7 +209,7 @@ resource "aws_instance" "k3s_server" {
     APP_IMAGE            = var.app_image
     HELLO_NODE_PORT      = tostring(var.hello_node_port)
     INSTALL_SCRIPT_URL   = var.install_script_url
-  INSTALL_DOCKER       = var.install_docker ? "true" : "false"
+    INSTALL_DOCKER       = var.install_docker ? "true" : "false"
   })
   key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
   tags = {

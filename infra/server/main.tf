@@ -158,7 +158,7 @@ resource "aws_instance" "k3s_server2" {
     APP_IMAGE            = "hashicorp/http-echo:0.2.3"
     HELLO_NODE_PORT      = "30080"
     INSTALL_SCRIPT_URL   = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
-  INSTALL_DOCKER       = var.install_docker ? "true" : "false"
+    INSTALL_DOCKER       = var.install_docker ? "true" : "false"
   })
   key_name = var.ssh_key_name
   tags = {
