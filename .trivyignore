@@ -1,0 +1,4 @@
+# Add CVE identifiers (one per line) to ignore specific vulnerabilities.
+# Example:
+# CVE-2023-12345
+# Rationale: False positive due to ...

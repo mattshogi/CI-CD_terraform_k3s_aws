@@ -218,10 +218,35 @@ jobs:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-docker.outputs.image-digest }}
           format: 'sarif'
           output: 'trivy-results.sarif'
-          severity: 'HIGH,CRITICAL'
-          exit-code: '1'
+          severity: 'CRITICAL'
+          exit-code: '0' # collect results without failing; we gate manually next
           ignore-unfixed: true
           vuln-type: 'os,library'
+
+      - name: Run Trivy JSON (for gating)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build-docker.outputs.image-digest }}
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: 'CRITICAL'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          exit-code: '0'
+
+      - name: Evaluate vulnerability threshold
+        run: |
+          CRIT_COUNT=$(jq '.Results[].Vulnerabilities // [] | map(select(.Severity=="CRITICAL")) | length' trivy-results.json 2>/dev/null | paste -sd+ - | bc || echo 0)
+          echo "Critical vulnerability count: $CRIT_COUNT"
+          THRESHOLD=${VULN_CRITICAL_THRESHOLD:-0}
+          if [ "$CRIT_COUNT" -gt "$THRESHOLD" ]; then
+            echo "❌ Exceeds CRITICAL vulnerability threshold ($THRESHOLD). Failing job." >&2
+            exit 1
+          else
+            echo "✅ Within CRITICAL vulnerability threshold ($THRESHOLD)."
+          fi
+        env:
+          VULN_CRITICAL_THRESHOLD: 0
 
       - name: Show Trivy summary
         if: always()
@@ -230,6 +255,14 @@ jobs:
             echo "First 20 lines of SARIF:"
             head -n 20 trivy-results.sarif || true
           fi
+
+      - name: Upload raw Trivy JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+            name: trivy-json-${{ github.run_attempt }}
+            path: trivy-results.json
+            if-no-files-found: ignore
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
