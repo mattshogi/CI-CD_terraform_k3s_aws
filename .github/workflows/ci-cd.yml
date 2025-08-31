@@ -19,6 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Derive sanitized dir name
+        id: dir_meta
+        run: |
+          raw="${{ matrix.terraform-dir }}"
+          safe="${raw//\//-}"
+          echo "sanitized=$safe" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
@@ -136,7 +143,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tflint-${{ matrix.terraform-dir }}
+          name: tflint-${{ steps.dir_meta.outputs.sanitized }}
           path: ${{ matrix.terraform-dir }}/tflint.out
           if-no-files-found: ignore
 
@@ -162,7 +169,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-validate-${{ matrix.terraform-dir }}
+          name: terraform-validate-${{ steps.dir_meta.outputs.sanitized }}
           path: ${{ matrix.terraform-dir }}/terraform-validate.out
           if-no-files-found: ignore
 
