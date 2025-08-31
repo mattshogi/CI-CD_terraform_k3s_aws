@@ -303,7 +303,7 @@ deploy_hello_world() {
     echo "[INFO] Skipping application deployment on agent node"
     return 0
   fi
-  echo "[INFO] Deploying Hello World application with image ${APP_IMAGE} (traefik or nginx ingress)..."
+  echo "[INFO] Deploying Hello World application with image ${APP_IMAGE} (traefik ingress)"
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
   k3s kubectl create namespace hello-world || true
   cat <<EOF | k3s kubectl apply -f -
@@ -315,7 +315,7 @@ metadata:
   labels:
     app: hello-world
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: hello-world
@@ -331,12 +331,24 @@ spec:
         - "-text=Hello, World!"
         ports:
         - containerPort: 5678
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 5678
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 5678
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
           requests:
-            memory: "32Mi"
-            cpu: "10m"
+            memory: "16Mi"
+            cpu: "5m"
           limits:
-            memory: "64Mi"
+            memory: "48Mi"
             cpu: "50m"
 ---
 apiVersion: v1
@@ -366,7 +378,8 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-  - http:
+  - host: ""
+    http:
       paths:
       - path: /
         pathType: Prefix
@@ -383,7 +396,7 @@ EOF
   echo "[INFO] Waiting for Hello World pods to become Ready..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
   local waited=0
-  local timeout=300
+  local timeout=240
   local fallback_performed=false
   while [ $waited -lt $timeout ]; do
     not_ready=$(k3s kubectl get pods -n hello-world --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1] != a[2]) print $0}' | wc -l || echo 1)
@@ -497,33 +510,7 @@ main() {
   echo "[INFO] Node Type: $([ "${NODE_INDEX:-0}" = "0" ] && echo "Server" || echo "Agent")"
   systemctl disable --now ufw 2>/dev/null || true
   wait_for_system
-  install_system_deps
-  setup_swap
-  install_docker
-  install_helm
-  install_k3s
-  if [ "${NODE_INDEX:-0}" = "0" ]; then
-    echo "[STAGE START] core-readiness"; wait_for_core_components; echo "[STAGE END] core-readiness"
-    echo "[STAGE START] helm-setup"; setup_helm_repos; echo "[STAGE END] helm-setup"
-    echo "[STAGE START] monitoring-ingress"; install_ingress; install_monitoring; wait_for_traefik; expose_monitoring; echo "[STAGE END] monitoring-ingress"
-    echo "[INFO] Deploying hello-world with retry attempts..."
-    local deploy_attempt=1
-    local deploy_max=5
-    until deploy_hello_world; do
-      if [ $deploy_attempt -ge $deploy_max ]; then
-        echo "[ERROR] deploy_hello_world failed after $deploy_attempt attempts" >&2
-        break
-      fi
-      echo "[WARN] deploy_hello_world attempt $deploy_attempt failed; retrying in 15s" >&2
-      sleep 15
-      deploy_attempt=$((deploy_attempt+1))
-    done
-    echo "[STAGE START] ingress-wait"; wait_for_hello_world_ingress || true; echo "[STAGE END] ingress-wait"
-    echo "[STAGE START] nodeport-wait"; wait_for_nodeport_rule || true; echo "[STAGE END] nodeport-wait"
-  fi
-  finalize_installation
-}
-
+  install_ingress() { echo "[INFO] install_ingress: no-op (using bundled traefik)"; }
 wait_for_hello_world_ingress() {
   echo "[INFO] Waiting for hello-world ingress to be admitted..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-INSTANCE_ID="i-03fe5e976846ba0be"
+INSTANCE_ID="${INSTANCE_ID:-}"
+if [ -z "$INSTANCE_ID" ]; then
+  # Try terraform output
+  if command -v terraform >/dev/null 2>&1; then
+    INSTANCE_ID=$(terraform -chdir=infra output -raw server_instance_id 2>/dev/null || true)
+  fi
+fi
+if [ -z "$INSTANCE_ID" ]; then
+  echo "INSTANCE_ID not provided and terraform output failed" >&2
+  exit 1
+fi
 PARAM_FILE="/tmp/ssm_cmd_params.json"
 if [ ! -f "$PARAM_FILE" ]; then
   echo "Missing $PARAM_FILE"
