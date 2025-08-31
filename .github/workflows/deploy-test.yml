@@ -93,6 +93,13 @@ jobs:
           if [ -n "${{ secrets.AWS_SSH_KEY_NAME }}" ]; then
             SSH_KEY_VAR="-var=ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME }}"
           fi
+          
+          echo "=== TERRAFORM PLAN DEBUGGING ==="
+          echo "SSH_KEY_VAR: $SSH_KEY_VAR"
+          echo "Instance type: ${{ github.event.inputs.instance_type }}"
+          echo "Enable monitoring: ${{ github.event.inputs.enable_monitoring }}"
+          echo "Resource suffix: ${{ github.run_id }}"
+          
           terraform plan \
             $SSH_KEY_VAR \
             -var="instance_type=${{ github.event.inputs.instance_type }}" \
@@ -101,7 +108,13 @@ jobs:
             -var="enable_monitoring=${{ github.event.inputs.enable_monitoring == 'true' }}" \
             -var="install_docker=${{ github.event.inputs.install_docker == 'true' }}" \
             -var="resource_name_suffix=${{ github.run_id }}" \
+            -var="vpc_id=" \
             -out=tfplan
+            
+          echo "=== PLAN VALIDATION ==="
+          terraform show -json tfplan > tfplan.json
+          echo "Plan contains $(jq -r '.resource_changes | length' tfplan.json) resource changes"
+          echo "Resources to create: $(jq -r '[.resource_changes[] | select(.change.actions[0] == "create")] | length' tfplan.json)"
 
       - name: Terraform Apply
         id: apply
@@ -110,15 +123,46 @@ jobs:
           echo "Starting Terraform apply..."
           echo "Instance type: ${{ github.event.inputs.instance_type }}"
           echo "Enable monitoring: ${{ github.event.inputs.enable_monitoring }}"
+          echo "AWS Region: ${{ env.AWS_REGION }}"
+          echo "Current time: $(date)"
+          
+          # Check AWS connectivity
+          echo "Testing AWS connectivity..."
+          aws ec2 describe-regions --region ${{ env.AWS_REGION }} --output table || echo "AWS connectivity test failed"
+          
+          # Check VPC availability
+          echo "Checking VPC availability..."
+          aws ec2 describe-vpcs --region ${{ env.AWS_REGION }} --query 'Vpcs[?IsDefault==`true`].[VpcId,CidrBlock,State]' --output table || true
+          
+          # Check subnets
+          echo "Checking available subnets..."
+          aws ec2 describe-subnets --region ${{ env.AWS_REGION }} --query 'Subnets[?DefaultForAz==`true`].[SubnetId,VpcId,AvailabilityZone,CidrBlock]' --output table || true
+          
+          # Check IAM permissions for EC2 and IAM operations
+          echo "Testing IAM permissions..."
+          aws ec2 describe-security-groups --region ${{ env.AWS_REGION }} --max-items 1 || echo "EC2 describe-security-groups failed"
+          aws iam list-roles --max-items 1 || echo "IAM list-roles failed"
+          
+          # Check EC2 limits
+          echo "Checking EC2 limits..."
+          aws ec2 describe-account-attributes --attribute-names supported-platforms --region ${{ env.AWS_REGION }} || true
+          
+          # Start apply with timeout and enhanced logging
+          echo "Starting Terraform apply with 8-minute timeout..."
           set -o pipefail
-          terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
+          timeout 480 terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
           ec=${PIPESTATUS[0]}
           echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
-          if [ $ec -ne 0 ]; then 
+          
+          if [ $ec -eq 124 ]; then
+            echo "[ERROR] Terraform apply timed out after 8 minutes" >&2
+          elif [ $ec -ne 0 ]; then 
             echo "[ERROR] Terraform apply failed with exit code: $ec" >&2
-            echo "Last 50 lines of terraform-apply.log:"
-            tail -n 50 ../terraform-apply.log || true
           fi
+          
+          echo "Apply completed. Exit code: $ec"
+          echo "Last 100 lines of terraform-apply.log:"
+          tail -n 100 ../terraform-apply.log || true
 
       - name: Transient retry (simple)
         id: apply_retry
@@ -148,10 +192,30 @@ jobs:
           echo "Final apply exit code: $final"
 
       - name: Show terraform apply log tail (on failure)
-        if: ${{ steps.apply_final.outputs.final_apply_exit_code != '0' }}
+        if: steps.apply_final.outputs.final_apply_exit_code != '0'
         run: |
-          echo "---- terraform-apply.log (last 120 lines) ----"
-          tail -n 120 terraform-apply.log || true
+          echo "=== TERRAFORM APPLY FAILURE DEBUGGING ==="
+          echo "Final exit code: ${{ steps.apply_final.outputs.final_apply_exit_code }}"
+          if [ -f infra/../terraform-apply.log ]; then
+            echo "=== FULL TERRAFORM LOG ==="
+            cat infra/../terraform-apply.log
+            echo "=== END TERRAFORM LOG ==="
+            
+            echo "=== ERROR ANALYSIS ==="
+            if grep -i "error\|failed\|timeout" infra/../terraform-apply.log; then
+              echo "Found error patterns above"
+            else
+              echo "No obvious error patterns found"
+            fi
+            
+            echo "=== RESOURCE STATUS CHECK ==="
+            aws ec2 describe-instances --region ${{ env.AWS_REGION }} --filters "Name=tag:Environment,Values=${{ github.event.inputs.environment || 'gha-test' }}" --query 'Reservations[*].Instances[*].[InstanceId,State.Name,LaunchTime]' --output table || true
+            
+            echo "=== SECURITY GROUP CHECK ==="
+            aws ec2 describe-security-groups --region ${{ env.AWS_REGION }} --filters "Name=tag:Environment,Values=${{ github.event.inputs.environment || 'gha-test' }}" --query 'SecurityGroups[*].[GroupId,GroupName,VpcId]' --output table || true
+          else
+            echo "No terraform log file found"
+          fi
 
       - name: Capture Terraform outputs
         if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
