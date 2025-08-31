@@ -144,6 +144,20 @@ jobs:
         working-directory: ${{ matrix.terraform-dir }}
         run: terraform validate -no-color | tee terraform-validate.out
 
+      - name: Debug (server module context)
+        if: matrix.terraform-dir == 'infra/server'
+        working-directory: ${{ matrix.terraform-dir }}
+        run: |
+          echo '--- DEBUG DIR STRUCTURE ---'
+          pwd
+            
+          echo 'Listing cluster directory referenced by templatefile'
+          ls -al ${GITHUB_WORKSPACE}/cluster || true
+          echo '--- Show main.tf snippet (lines 1-40) ---'
+          sed -n '1,120p' main.tf
+          echo '--- Run terraform validate -json ---'
+          terraform validate -json || true
+
       - name: Upload Terraform Validate Report
         if: always()
         uses: actions/upload-artifact@v4
