@@ -44,7 +44,6 @@ env:
   TF_IN_AUTOMATION: 1
   AWS_REGION: us-east-1
   TERRAFORM_CLI_ARGS: -no-color
-  # HAS_SSH_KEY will be set dynamically by a step
 
 jobs:
   deploy-validate-destroy:
@@ -59,7 +58,6 @@ jobs:
       - name: Detect secrets
         id: detect
         run: |
-          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then echo "ssh=true" >> $GITHUB_OUTPUT; fi
           if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "aws=true" >> $GITHUB_OUTPUT; else echo "aws=false" >> $GITHUB_OUTPUT; fi
 
       - name: Fail fast if AWS credentials missing
@@ -80,12 +78,7 @@ jobs:
         if: steps.detect.outputs.aws == 'true'
         run: aws sts get-caller-identity
 
-      - name: Prepare SSH key (optional validation via SSH)
-        if: steps.detect.outputs.ssh == 'true'
-        run: |
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_k3s_aws
-          chmod 600 ~/.ssh/id_k3s_aws
-          printf "Host *\n  StrictHostKeyChecking no\n" > ~/.ssh/config
+  # SSH key handling removed for simplicity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -321,7 +314,7 @@ jobs:
           fi
 
       - name: Monitoring failure diagnostics (SSM)
-        if: ${{ failure() && steps.monitoring_validate.conclusion == 'failure' && steps.detect.outputs.aws == 'true' && steps.tf-out.outputs.instance_id != '' }}
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' && steps.detect.outputs.aws == 'true' && github.event.inputs.enable_monitoring == 'true' && steps.tf-out.outputs.instance_id != '' && (steps.monitoring_validate.outputs.grafana_ok == 'false' || steps.monitoring_validate.outputs.prometheus_ok == 'false') }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           echo "Collecting monitoring diagnostics via SSM for $iid"
@@ -331,12 +324,12 @@ jobs:
           echo "Monitoring diagnostics captured (size $(wc -c < monitoring-ssm-diagnostics.txt 2>/dev/null || echo 0) bytes)"
 
       - name: SSM in-cluster curl diagnostics (on validation failure)
-        if: ${{ failure() && steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result != 'success' }}
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result != 'success' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           [ -z "$iid" ] && echo "No instance id for SSM diagnostics" && exit 0
           echo "Running in-cluster curl diagnostics via SSM"
-          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== kubectl get pods -A ====="; k3s kubectl get pods -A -o wide || true; echo "===== kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== kubectl describe ingress hello-world -n hello-world ====="; k3s kubectl describe ingress hello-world -n hello-world || true; echo "===== kubectl get svc -n hello-world ====="; k3s kubectl get svc -n hello-world || true; echo "===== curl localhost NodePort (30080) ====="; curl -s -m 5 http://127.0.0.1:30080/ || true;' --query 'Command.CommandId' --output text || true)
+          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== kubectl get pods -A ====="; k3s kubectl get pods -A -o wide || true; echo "===== kubectl get pods -n kube-system -l app=traefik ====="; k3s kubectl get pods -n kube-system -l app=traefik -o wide || true; echo "===== kubectl describe pods -n kube-system -l app=traefik ====="; k3s kubectl describe pods -n kube-system -l app=traefik || true; echo "===== kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== kubectl describe ingress hello-world -n hello-world ====="; k3s kubectl describe ingress hello-world -n hello-world || true; echo "===== kubectl get svc -n hello-world ====="; k3s kubectl get svc -n hello-world -o yaml || true; echo "===== kubectl get events -A (tail 80) ====="; k3s kubectl get events -A --sort-by=.lastTimestamp | tail -n 80 || true; echo "===== curl localhost NodePort (30080) ====="; curl -sv -m 5 http://127.0.0.1:30080/ 2>&1 | head -n 40 || true; echo "===== tail hello world diagnostics file ====="; tail -n 200 /var/log/k3s_diagnostics_hello_world.txt || true; echo "===== iptables KUBE-NODEPORTS ====="; iptables -t nat -L KUBE-NODEPORTS -n -v 2>/dev/null || true;' --query 'Command.CommandId' --output text || true)
           sleep 6
           aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > validation-ssm-curl.txt 2>/dev/null || true
           echo "Saved SSM curl diagnostics (size $(wc -c < validation-ssm-curl.txt 2>/dev/null || echo 0) bytes)"
@@ -347,25 +340,7 @@ jobs:
           echo "(Secondary validation skipped: replaced by Active endpoint validation step)"
           true
 
-      - name: Optional SSH diagnostics
-        if: steps.detect.outputs.ssh == 'true'
-        continue-on-error: true
-        run: |
-          ip=${{ steps.tf-out.outputs.server_ip }}
-          echo "Collecting remote diagnostics from $ip"
-          for cmd in \
-            "sudo systemctl status k3s --no-pager" \
-            "sudo journalctl -u k3s -n 400 --no-pager" \
-            "sudo tail -n 200 /var/log/cloud-init-output.log" \
-            "sudo k3s kubectl get nodes -o wide" \
-            "sudo k3s kubectl get pods -A -o wide" \
-            "sudo k3s kubectl get svc -A" \
-            "sudo k3s kubectl get ingress -A" \
-            "sudo k3s kubectl describe ingress -A || true" \
-            "sudo k3s kubectl describe pods -n hello-world || true"; do
-              echo "===== $cmd =====";
-              ssh -i ~/.ssh/id_k3s_aws ubuntu@"$ip" "$cmd" || true;
-            done > diagnostics.txt
+  # Optional SSH diagnostics removed
 
       - name: Fetch EC2 console output
         if: always()
@@ -376,8 +351,8 @@ jobs:
           aws ec2 get-console-output --instance-id "$iid" --latest --output text > console-output.txt 2>/dev/null || echo "(No console output yet)" > console-output.txt
           ls -l console-output.txt
 
-      - name: SSM diagnostics (no SSH key)
-        if: always() && steps.detect.outputs.aws == 'true' && steps.detect.outputs.ssh != 'true'
+      - name: SSM diagnostics
+        if: always() && steps.detect.outputs.aws == 'true'
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ "$iid" = "UNKNOWN" ]; then echo "Instance ID unknown, skipping SSM diagnostics"; exit 0; fi
