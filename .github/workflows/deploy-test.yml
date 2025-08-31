@@ -49,13 +49,12 @@ jobs:
   deploy-validate-destroy:
     name: Provision → Validate → (Destroy)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      - name: Detect secrets
+      - name: Detect AWS credentials
         id: detect
         run: |
           if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "aws=true" >> $GITHUB_OUTPUT; else echo "aws=false" >> $GITHUB_OUTPUT; fi
@@ -63,8 +62,7 @@ jobs:
       - name: Fail fast if AWS credentials missing
         if: steps.detect.outputs.aws != 'true'
         run: |
-          echo "ERROR: AWS credentials not provided. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY repository or environment secrets." >&2
-          exit 1
+          echo "ERROR: AWS credentials not provided." >&2; exit 1
 
       - name: Configure AWS credentials
         if: steps.detect.outputs.aws == 'true'
@@ -75,10 +73,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS identity
-        if: steps.detect.outputs.aws == 'true'
         run: aws sts get-caller-identity
-
-  # SSH key handling removed for simplicity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -104,322 +99,202 @@ jobs:
             -out=tfplan
 
       - name: Terraform Apply
-        working-directory: infra
         id: apply
+        working-directory: infra
         run: |
           set -o pipefail
-          echo "[INFO] Applying terraform plan..."
           terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
           ec=${PIPESTATUS[0]}
           echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
-          if [ $ec -ne 0 ]; then
-            echo "[ERROR] terraform apply failed with exit code $ec (continuing for diagnostics)" >&2
-            echo "---- BEGIN terraform-apply.log (last 120 lines) immediate snippet ----" >&2
-            tail -n 120 ../terraform-apply.log || true
-            echo "---- END terraform-apply.log immediate snippet ----" >&2
-          fi
+          if [ $ec -ne 0 ]; then echo "Terraform apply failed" >&2; exit $ec; fi
 
-      - name: Classify Terraform Apply Failure
-        if: ${{ steps.apply.outputs.apply_exit_code != '0' }}
-        id: classify
-        run: |
-          echo "classification=unknown" >> $GITHUB_OUTPUT
-          [ -f terraform-apply.log ] || { echo "No terraform-apply.log present"; exit 0; }
-          echo "---- Scanning terraform-apply.log for common transient error patterns ----"
-          grep -E 'Throttling|RequestLimitExceeded|timeout|Time[out]|timed out|InternalError|ServiceUnavailable|DependencyViolation|NoSuchEntity|InvalidIAMInstanceProfile|Conflict|retryable' terraform-apply.log || true
-          if grep -qiE 'Throttling|RequestLimitExceeded' terraform-apply.log; then cls=throttling; elif grep -qiE 'NoSuchEntity|InvalidIAMInstanceProfile' terraform-apply.log; then cls=iam-propagation; elif grep -qi 'DependencyViolation' terraform-apply.log; then cls=dependency-violation; elif grep -qiE 'ServiceUnavailable|InternalError' terraform-apply.log; then cls=provider-internal; else cls=unknown; fi
-          echo "Detected classification: $cls"
-          echo "classification=$cls" >> $GITHUB_OUTPUT
-
-      - name: Terraform Apply Retry (transient)
-        if: ${{ steps.apply.outputs.apply_exit_code != '0' && (steps.classify.outputs.classification == 'throttling' || steps.classify.outputs.classification == 'iam-propagation' || steps.classify.outputs.classification == 'provider-internal' || steps.classify.outputs.classification == 'dependency-violation') }}
+      - name: Transient retry (simple)
         id: apply_retry
+        if: failure() && steps.apply.outputs.apply_exit_code != '0'
         working-directory: infra
         run: |
-          echo "[INFO] Retry conditions met (classification=${{ steps.classify.outputs.classification }}). Sleeping 20s before retry..."
-          sleep 20
+          echo "Attempting simple transient retry (throttling/IAM propagation)"
+          if ! grep -qiE 'Throttling|RequestLimitExceeded|InvalidIAMInstanceProfile|NoSuchEntity|DependencyViolation|ServiceUnavailable|InternalError' ../terraform-apply.log 2>/dev/null; then
+            echo "No transient patterns detected; skipping retry"; exit 1
+          fi
+          sleep 25
           set -o pipefail
           terraform apply -auto-approve tfplan 2>&1 | tee -a ../terraform-apply.log
           ec=${PIPESTATUS[0]}
           echo "apply_retry_exit_code=$ec" >> $GITHUB_OUTPUT
-          if [ $ec -ne 0 ]; then
-            echo "[ERROR] retry terraform apply failed with exit code $ec" >&2
-          else
-            echo "[INFO] retry terraform apply succeeded"
-          fi
+          if [ $ec -ne 0 ]; then echo "Retry still failed" >&2; exit $ec; fi
 
-      - name: Determine Final Apply Success
+      - name: Set final apply status
+        if: always()
         id: apply_final
         run: |
           init='${{ steps.apply.outputs.apply_exit_code }}'
-          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code }}'
-          [ -z "$init" ] && init=1
-          final=failure
-            if [ "$init" = "0" ]; then final=success; fi
-            if [ "$retry" = "0" ]; then final=success; fi
-          echo "initial_exit=$init" >> $GITHUB_OUTPUT
-          echo "retry_exit=${retry:-n/a}" >> $GITHUB_OUTPUT
-          echo "final=$final" >> $GITHUB_OUTPUT
-          echo "Apply initial exit: $init; retry exit: ${retry:-n/a}; final=$final"
+          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code || '' }}'
+          final=$init
+          if [ -n "$retry" ]; then final=$retry; fi
+          echo "final_apply_exit_code=$final" >> $GITHUB_OUTPUT
+          echo "Final apply exit code: $final"
 
-      - name: Debug Apply Outcome
-        if: always()
-        run: |
-          echo "apply_exit_code=${{ steps.apply.outputs.apply_exit_code }}"
-          echo "apply_retry_exit_code=${{ steps.apply_retry.outputs.apply_retry_exit_code || 'none' }}"
-          echo "final=${{ steps.apply_final.outputs.final }}"
-
-      - name: Evaluate Apply Success (APPLY_OK)
-        id: apply_ok
-        run: |
-          init='${{ steps.apply.outputs.apply_exit_code }}'
-          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code }}'
-          if [ "$init" = "0" ] || [ "$retry" = "0" ]; then ok=true; else ok=false; fi
-          echo "APPLY_OK=$ok" >> $GITHUB_ENV
-          echo "apply_ok=$ok" >> $GITHUB_OUTPUT
-          echo "Computed APPLY_OK=$ok (init=$init retry=${retry:-n/a})"
-
-      - name: Capture Outputs
-        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
+      - name: Capture Terraform outputs
         id: tf-out
         working-directory: infra
         run: |
-          get_out() { key=$1; name=$2; val=$(terraform output -raw "$key" 2>/dev/null || true); val=$(printf "%s" "$val" | tr -d '\r' | head -n1 | sed 's/ /_/g'); if [ -z "$val" ]; then val=UNKNOWN; fi; echo "$name=$val" >> $GITHUB_OUTPUT; }
-          get_out server_public_ip server_ip
-          get_out server_instance_id instance_id
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y jq >/dev/null 2>&1 || true
+            out_json=$(terraform output -json || exit 1)
+          ip=$(echo "$out_json" | jq -r '.server_public_ip.value // empty')
+          iid=$(echo "$out_json" | jq -r '.server_instance_id.value // empty')
+          [ -z "$ip" ] && ip=UNKNOWN
+          [ -z "$iid" ] && iid=UNKNOWN
+          echo "server_ip=$ip" >> $GITHUB_OUTPUT
+          echo "instance_id=$iid" >> $GITHUB_OUTPUT
 
-      - name: Echo Terraform outputs
-        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
+      - name: Echo outputs
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
+          echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}"
+          if ! echo "${{ steps.tf-out.outputs.instance_id }}" | grep -q '^i-'; then echo "[WARN] Instance ID pattern invalid"; fi
 
-      - name: Initial warm-up wait (reduced)
-        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
+      - name: Warm-up (k3s install)
         run: |
-          ip=${{ steps.tf-out.outputs.server_ip }}
-          echo "Reduced warm-up (60s) to allow k3s install + core pods (IP: $ip)"
-          sleep 60
+          echo "Warm-up 75s for k3s core components"
+          sleep 75
 
-      - name: Poll k3s readiness via SSM
-        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
+      - name: Wait monitoring components (pods/services)
+        if: ${{ github.event.inputs.enable_monitoring == 'true' }}
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skip monitoring wait (invalid instance id)"; exit 0; fi
+          echo "Waiting for monitoring pods (timeout 6m)"
+          deadline=$((SECONDS+360))
+          while [ $SECONDS -lt $deadline ]; do
+            CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='k3s kubectl get pods -n monitoring --no-headers 2>/dev/null || true' --query 'Command.CommandId' --output text 2>/dev/null || true)
+            sleep 6
+            pods=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text 2>/dev/null || true)
+            echo "Pods:\n$pods" | sed 's/\t/ /g'
+            ready_graf=$(echo "$pods" | grep -i grafana | grep -cE 'Running|Completed' || true)
+            ready_prom=$(echo "$pods" | grep -i prometheus | grep -cE 'Running|Completed' || true)
+            if [ $ready_graf -ge 1 ] && [ $ready_prom -ge 1 ]; then echo "Monitoring pods appear running"; break; fi
+            sleep 10
+          done
+          echo "Finished monitoring pod wait"
+
+      - name: Poll k3s readiness (nodes)
         id: k3s_ready
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
-          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then
-            echo "Instance ID unknown; skipping k3s readiness poll"; exit 0; fi
-          echo "Polling k3s node list via SSM (timeout 6 min)";
-          deadline=$((SECONDS+360))
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skipping k3s poll (invalid instance id)"; exit 0; fi
+          deadline=$((SECONDS+300))
+          echo "Polling k3s node readiness via SSM (5 min timeout)"
           while [ $SECONDS -lt $deadline ]; do
-            CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='k3s kubectl get nodes --no-headers 2>/dev/null || true' --query 'Command.CommandId' --output text || true)
-            sleep 6
-            out=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text 2>/dev/null || true)
-            echo "Attempt output: ${out}" | sed 's/\\n/ /g'
-            if echo "$out" | grep -q 'Ready'; then
-              echo "k3s_ready=true" >> $GITHUB_OUTPUT
-              echo "k3s cluster reports Ready node"; break
-            fi
-            sleep 10
-          done
-          # Final note (can't re-read step output easily in script without context parsing)
-          echo "Finished k3s readiness polling phase"
-
-      - name: Poll k3s readiness marker (SSM)
-        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
-        run: |
-          iid=${{ steps.tf-out.outputs.instance_id }}
-          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Unknown instance id; skipping marker poll"; exit 0; fi
-          echo "Polling for /tmp/k3s-ready marker (timeout 6 min)"
-          deadline=$((SECONDS+360))
-          while [ $SECONDS -lt $deadline ]; do
-            CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='test -f /tmp/k3s-ready && echo READY || echo NOT_READY' --query 'Command.CommandId' --output text || true)
+            CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='k3s kubectl get nodes --no-headers 2>/dev/null || true' --query 'Command.CommandId' --output text 2>/dev/null || true)
             sleep 5
             out=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text 2>/dev/null || true)
-            echo "Marker status: $out"
-            if echo "$out" | grep -q READY; then echo "Marker detected"; exit 0; fi
-            sleep 10
+            echo "Node query: $out"
+            if echo "$out" | grep -q 'Ready'; then echo "k3s_ready=true" >> $GITHUB_OUTPUT; break; fi
+            sleep 7
           done
-          echo "Marker not detected within timeout"
+          echo "Finished k3s readiness polling"
 
-      - name: Pre-validation service snapshot (SSM)
-        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
-        run: |
-          iid=${{ steps.tf-out.outputs.instance_id }}
-          [ -z "$iid" ] && echo "No instance id for snapshot" && exit 0
-          echo "Collecting pre-validation snapshot via SSM"
-          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== pre-validation kubectl get nodes ====="; k3s kubectl get nodes -o wide || true; echo "===== pre-validation kubectl get pods -A (top 40) ====="; k3s kubectl get pods -A -o wide 2>/dev/null | head -n 40 || true; echo "===== pre-validation kubectl get svc -A ====="; k3s kubectl get svc -A || true; echo "===== pre-validation kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== tail cloud-init-output.log (120) ====="; tail -n 120 /var/log/cloud-init-output.log || true;' --query 'Command.CommandId' --output text || true)
-          sleep 6
-          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > pre-validation-snapshot.txt 2>/dev/null || true
-          echo "Pre-validation snapshot captured (size $(wc -c < pre-validation-snapshot.txt 2>/dev/null || echo 0) bytes)"
-
-      - name: Fetch monitoring exposure log (SSM)
-        if: ${{ always() && steps.detect.outputs.aws == 'true' && steps.tf-out.outputs.instance_id != '' }}
-        run: |
-          iid=${{ steps.tf-out.outputs.instance_id }}
-          [ -z "$iid" ] && echo "No instance id for monitoring log" && exit 0
-          echo "Attempting to retrieve /var/log/k3s_monitoring_expose.log via SSM"
-          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='if [ -f /var/log/k3s_monitoring_expose.log ]; then echo "===== k3s_monitoring_expose.log ====="; tail -n 400 /var/log/k3s_monitoring_expose.log; else echo "(monitoring exposure log not present)"; fi' --query 'Command.CommandId' --output text || true)
-          sleep 6
-          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > monitoring-expose.log 2>/dev/null || echo "(no monitoring log content)" > monitoring-expose.log
-          echo "Monitoring exposure log captured (size $(wc -c < monitoring-expose.log 2>/dev/null || echo 0) bytes)"
-
-      - name: Active endpoint validation (Ingress + NodePort)
-        id: active_validate
-        continue-on-error: true
-        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
+      - name: Validate ingress & monitoring
+        id: validate
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
-          attempts=${{ github.event.inputs.readiness_attempts }}
-          echo "Running scripts/validate_endpoints.sh $ip $attempts 5"
-          chmod +x scripts/validate_endpoints.sh || true
-          if ! scripts/validate_endpoints.sh "$ip" "$attempts" 5; then
-            echo "Endpoint validation did not succeed within given attempts" >&2
-            echo "validation_result=failure" >> $GITHUB_OUTPUT
+          if [ -z "$ip" ] || [ "$ip" = "UNKNOWN" ]; then echo "Missing IP" >&2; exit 1; fi
+          echo "Validating ingress http://$ip/"
+          ok=false
+          for i in $(seq 1 25); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip/" || echo 000)
+            echo "Attempt $i code=$code"
+            if [ "$code" = "200" ]; then ok=true; break; fi
+            sleep 5
+          done
+          if [ "$ok" != true ]; then
+            echo "Ingress unreachable; trying NodePort fallback (30080)" >&2
+            for i in $(seq 1 15); do
+              np_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30080/" || echo 000)
+              echo "NodePort attempt $i code=$np_code"
+              if [ "$np_code" = "200" ]; then ok=true; echo "nodeport_used=true" >> $GITHUB_OUTPUT; break; fi
+              sleep 4
+            done
           else
-            echo "validation_result=success" >> $GITHUB_OUTPUT
+            echo "Ingress reachable"; echo "nodeport_used=false" >> $GITHUB_OUTPUT
           fi
-
-      - name: Monitoring endpoints validation (Grafana/Prometheus)
-        id: monitoring_validate
-        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' && github.event.inputs.enable_monitoring == 'true' }}
-        continue-on-error: true
-        run: |
-          ip=${{ steps.tf-out.outputs.server_ip }}
-          echo "Validating monitoring NodePorts on $ip (Grafana:30030 Prometheus:30900) with faster loop"
-          retries=24
-          sleep_between=5
-          success_graf=false
-            success_prom=false
-          stability_needed=3
-          stable_graf=0; stable_prom=0
-          ok_code() { code=$1; if echo "$code" | grep -qE '^(2|3)[0-9][0-9]$'; then return 0; fi; [ "$code" = "401" ] && return 0; return 1; }
-          for i in $(seq 1 $retries); do
-            code_graf=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30030/" || echo 000)
-            code_prom=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30900/" || echo 000)
-            echo "Attempt $i: Grafana=$code_graf Prometheus=$code_prom"
-            if ok_code "$code_graf"; then success_graf=true; stable_graf=$((stable_graf+1)); else stable_graf=0; fi
-            if ok_code "$code_prom"; then success_prom=true; stable_prom=$((stable_prom+1)); else stable_prom=0; fi
-            if [ $stable_graf -ge $stability_needed ] && [ $stable_prom -ge $stability_needed ]; then
-              echo "Both monitoring endpoints returned acceptable codes for $stability_needed consecutive attempts"
-              break
-            fi
-            sleep $sleep_between
-          done
-          echo "grafana_ok=$success_graf" >> $GITHUB_OUTPUT
-          echo "prometheus_ok=$success_prom" >> $GITHUB_OUTPUT
-          if [ "$success_graf" != true ] || [ "$success_prom" != true ]; then
-            echo "One or both monitoring endpoints not reachable (grafana=$success_graf prometheus=$success_prom)" >&2
-            exit 1
+          if [ "$ok" != true ]; then echo "validation_result=failure" >> $GITHUB_OUTPUT; echo "Application endpoints unreachable" >&2; exit 1; fi
+          echo "Application reachable (ok=$ok)"
+          if [ '${{ github.event.inputs.enable_monitoring }}' = 'true' ]; then
+            echo "Checking monitoring endpoints (Grafana 30030 login path, Prometheus 30900 /-/ready)"
+            graf=false; prom=false
+            for i in $(seq 1 30); do
+              g=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30030/login" || echo 000)
+              p=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30900/-/ready" || echo 000)
+              echo "Mon Attempt $i grafana=$g prometheus=$p"
+              [[ $g =~ ^(200|302|401)$ ]] && graf=true
+              [ "$p" = "200" ] && prom=true
+              if [ "$graf" = true ] && [ "$prom" = true ]; then break; fi
+              sleep 6
+            done
+            echo "grafana_ok=$graf" >> $GITHUB_OUTPUT
+            echo "prometheus_ok=$prom" >> $GITHUB_OUTPUT
+            if [ "$graf" != true ] || [ "$prom" != true ]; then echo "validation_result=failure" >> $GITHUB_OUTPUT; echo "Monitoring endpoints unreachable" >&2; exit 1; fi
+            echo "Monitoring reachable"
           fi
+          echo "validation_result=success" >> $GITHUB_OUTPUT
 
-      - name: Monitoring failure diagnostics (SSM)
-        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' && steps.detect.outputs.aws == 'true' && github.event.inputs.enable_monitoring == 'true' && steps.tf-out.outputs.instance_id != '' && (steps.monitoring_validate.outputs.grafana_ok == 'false' || steps.monitoring_validate.outputs.prometheus_ok == 'false') }}
+      - name: Fetch monitoring exposure log
+        if: ${{ always() && github.event.inputs.enable_monitoring == 'true' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
-          echo "Collecting monitoring diagnostics via SSM for $iid"
-          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== monitoring namespace pods ====="; k3s kubectl get pods -n monitoring -o wide || true; echo "===== monitoring services ====="; k3s kubectl get svc -n monitoring || true; echo "===== describe grafana svc ====="; k3s kubectl describe svc kube-prometheus-stack-grafana -n monitoring || true; echo "===== describe prometheus svc ====="; k3s kubectl describe svc kube-prometheus-stack-prometheus -n monitoring || true; echo "===== recent monitoring events (tail) ====="; k3s kubectl get events -n monitoring --sort-by=.lastTimestamp | tail -n 40 || true; echo "===== monitoring expose log (tail 120) ====="; tail -n 120 /var/log/k3s_monitoring_expose.log || true;' --query 'Command.CommandId' --output text || true)
-          sleep 8
-          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > monitoring-ssm-diagnostics.txt 2>/dev/null || echo "(no monitoring diagnostics)" > monitoring-ssm-diagnostics.txt
-          echo "Monitoring diagnostics captured (size $(wc -c < monitoring-ssm-diagnostics.txt 2>/dev/null || echo 0) bytes)"
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Skip monitoring log fetch (invalid instance id)"; exit 0; fi
+          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='if [ -f /var/log/k3s_monitoring_expose.log ]; then tail -n 300 /var/log/k3s_monitoring_expose.log; else echo "(no monitoring expose log)"; fi' --query 'Command.CommandId' --output text 2>/dev/null || true)
+          sleep 6
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > monitoring-expose.log 2>/dev/null || echo "(no monitoring expose log)" > monitoring-expose.log
 
-      - name: SSM in-cluster curl diagnostics (on validation failure)
-        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result != 'success' }}
+      - name: SSM diagnostics on validation failure
+        if: failure()
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
-          [ -z "$iid" ] && echo "No instance id for SSM diagnostics" && exit 0
-          echo "Running in-cluster curl diagnostics via SSM"
-          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== kubectl get pods -A ====="; k3s kubectl get pods -A -o wide || true; echo "===== kubectl get pods -n kube-system -l app=traefik ====="; k3s kubectl get pods -n kube-system -l app=traefik -o wide || true; echo "===== kubectl describe pods -n kube-system -l app=traefik ====="; k3s kubectl describe pods -n kube-system -l app=traefik || true; echo "===== kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== kubectl describe ingress hello-world -n hello-world ====="; k3s kubectl describe ingress hello-world -n hello-world || true; echo "===== kubectl get svc -n hello-world ====="; k3s kubectl get svc -n hello-world -o yaml || true; echo "===== kubectl get events -A (tail 80) ====="; k3s kubectl get events -A --sort-by=.lastTimestamp | tail -n 80 || true; echo "===== curl localhost NodePort (30080) ====="; curl -sv -m 5 http://127.0.0.1:30080/ 2>&1 | head -n 40 || true; echo "===== tail hello world diagnostics file ====="; tail -n 200 /var/log/k3s_diagnostics_hello_world.txt || true; echo "===== iptables KUBE-NODEPORTS ====="; iptables -t nat -L KUBE-NODEPORTS -n -v 2>/dev/null || true;' --query 'Command.CommandId' --output text || true)
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skip diagnostics (invalid instance id)"; exit 0; fi
+          echo "Collecting failure diagnostics via SSM"
+          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== kubectl get nodes ====="; k3s kubectl get nodes -o wide || true; echo "===== kubectl get pods -A (top 40) ====="; k3s kubectl get pods -A -o wide | head -n 40 || true; echo "===== kubectl get svc -A ====="; k3s kubectl get svc -A || true; echo "===== kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== describe ingress hello-world ====="; k3s kubectl describe ingress hello-world -n hello-world || true; echo "===== tail cloud-init-output.log (120) ====="; tail -n 120 /var/log/cloud-init-output.log || true;' --query 'Command.CommandId' --output text 2>/dev/null || true)
           sleep 6
           aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > validation-ssm-curl.txt 2>/dev/null || true
-          echo "Saved SSM curl diagnostics (size $(wc -c < validation-ssm-curl.txt 2>/dev/null || echo 0) bytes)"
-
-      - name: Run endpoint validation script
-        if: cancelled() == false
-        run: |
-          echo "(Secondary validation skipped: replaced by Active endpoint validation step)"
-          true
-
-  # Optional SSH diagnostics removed
+          echo "Saved validation-ssm-curl.txt"
 
       - name: Fetch EC2 console output
         if: always()
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
-          echo "Instance ID: $iid"
-          if [ "$iid" = "UNKNOWN" ]; then echo "Instance ID unknown, skipping console output"; exit 0; fi
-          aws ec2 get-console-output --instance-id "$iid" --latest --output text > console-output.txt 2>/dev/null || echo "(No console output yet)" > console-output.txt
-          ls -l console-output.txt
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Skip console output (invalid instance id)"; exit 0; fi
+          aws ec2 get-console-output --instance-id "$iid" --latest --output text > console-output.txt 2>/dev/null || echo "(No console output)" > console-output.txt
 
-      - name: SSM diagnostics
-        if: always() && steps.detect.outputs.aws == 'true'
+      - name: Minimal SSM diagnostics (always)
+        if: always()
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
-          if [ "$iid" = "UNKNOWN" ]; then echo "Instance ID unknown, skipping SSM diagnostics"; exit 0; fi
-          echo "Sending SSM diagnostics command to $iid"
-          # Build JSON parameters for AWS-RunShellScript (array of commands executed sequentially)
-          JSON_B64=$(printf '%s' '{"commands":["set -x","echo \"===== tail cloud-init-output.log (400 lines) =====\"; tail -n 400 /var/log/cloud-init-output.log 2>&1 || true","if [ -f /var/log/k3s_diagnostics_hello_world.txt ]; then echo \"===== k3s_diagnostics_hello_world.txt (200 lines) =====\"; tail -n 200 /var/log/k3s_diagnostics_hello_world.txt; fi","echo \"===== kubectl get nodes -o wide =====\"; sudo k3s kubectl get nodes -o wide 2>&1 || true","echo \"===== kubectl get pods -A -o wide =====\"; sudo k3s kubectl get pods -A -o wide 2>&1 || true","echo \"===== kubectl get svc -A =====\"; sudo k3s kubectl get svc -A 2>&1 || true","echo \"===== kubectl get ingress -A =====\"; sudo k3s kubectl get ingress -A 2>&1 || true","echo \"===== kubectl describe ingress hello-world -n hello-world =====\"; sudo k3s kubectl describe ingress hello-world -n hello-world 2>&1 || true"]}' | base64 -w0 2>/dev/null || base64)
+          if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skip SSM diagnostics (invalid instance id)"; exit 0; fi
+          JSON_B64=$(printf '%s' '{"commands":["echo ==== kubectl get nodes ====; k3s kubectl get nodes -o wide || true","echo ==== kubectl get pods -A (top 30) ====; k3s kubectl get pods -A -o wide | head -n 30 || true","echo ==== kubectl get svc -A ====; k3s kubectl get svc -A || true","echo ==== kubectl get ingress -A ====; k3s kubectl get ingress -A || true"]}' | base64 -w0 2>/dev/null || base64)
           echo "$JSON_B64" | base64 -d > params.json 2>/dev/null || echo "$JSON_B64" | base64 --decode > params.json
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$iid" \
-            --document-name AWS-RunShellScript \
-            --comment "Collect k3s diagnostics" \
-            --parameters file://params.json \
-            --query 'Command.CommandId' --output text)
-          echo "Command ID: $CMD_ID"
-          # Poll status
-          for i in $(seq 1 30); do
-            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query 'CommandInvocations[0].Status' --output text || echo "Unknown")
-            echo "SSM command status: $STATUS"
-            if [ "$STATUS" = "Success" ] || [ "$STATUS" = "Failed" ]; then break; fi
-            sleep 6
-          done
-          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > ssm-diagnostics.txt 2>/dev/null || echo "(No SSM output)" > ssm-diagnostics.txt
-          echo "SSM diagnostics captured (size $(wc -c < ssm-diagnostics.txt) bytes)"
-
-      - name: Extra cloud-init & k3s status snapshot
-        if: ${{ always() && steps.detect.outputs.aws == 'true' }}
-        run: |
-          iid=${{ steps.tf-out.outputs.instance_id }}
-          [ -z "$iid" ] && echo "No instance id for snapshot" && exit 0
-          echo "Collecting additional snapshot via SSM single command"
-          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "==== systemctl status k3s (may fail early) ===="; sudo systemctl status k3s --no-pager 2>&1 || true; echo "==== ps aux | grep k3s server ===="; ps aux | grep k3s | grep -v grep || true; echo "==== tail -n 120 /var/log/cloud-init-output.log ===="; tail -n 120 /var/log/cloud-init-output.log 2>&1 || true;' --query 'Command.CommandId' --output text || true)
+          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --comment "Minimal diagnostics" --parameters file://params.json --query 'Command.CommandId' --output text 2>/dev/null || true)
           sleep 6
-          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > extra-snapshot.txt 2>/dev/null || true
-          echo "Extra snapshot captured (size $(wc -c < extra-snapshot.txt 2>/dev/null || echo 0) bytes)"
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > ssm-diagnostics.txt 2>/dev/null || echo "(No SSM diagnostics)" > ssm-diagnostics.txt
 
-      - name: Upload diagnostics
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: deploy-test-diagnostics
           path: |
             infra/terraform.tfstate
-            diagnostics.txt
+            terraform-apply.log
             console-output.txt
             ssm-diagnostics.txt
-            terraform-apply.log
-            extra-snapshot.txt
             validation-ssm-curl.txt
-            pre-validation-snapshot.txt
             monitoring-expose.log
-            monitoring-ssm-diagnostics.txt
           if-no-files-found: warn
 
-      - name: Terraform Apply Log Snippet
-        if: always()
-        run: |
-          if [ -f terraform-apply.log ]; then
-            echo "---- BEGIN terraform-apply.log (last 120 lines) ----"
-            tail -n 120 terraform-apply.log || true
-            echo "---- END terraform-apply.log ----"
-          else
-            echo "terraform-apply.log missing"
-          fi
-          if [ "${{ steps.classify.outputs.classification }}" != "" ]; then
-            echo "Classification: ${{ steps.classify.outputs.classification }}"
-          fi
-
-      - name: Terraform Destroy (ephemeral cleanup)
-        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result == 'success')) }}
+      - name: Terraform Destroy (cleanup)
+        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply.outputs.apply_exit_code == '0' && steps.validate.outputs.validation_result == 'success')) }}
         working-directory: infra
         run: terraform destroy -auto-approve
 
@@ -428,30 +303,14 @@ jobs:
         run: |
           echo "## Deploy Test Summary" >> $GITHUB_STEP_SUMMARY
           echo "Instance IP: ${{ steps.tf-out.outputs.server_ip }}" >> $GITHUB_STEP_SUMMARY
-          echo "Kept Resources: ${{ github.event.inputs.keep_resources }}" >> $GITHUB_STEP_SUMMARY
-          echo "Instance Type: ${{ github.event.inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
-          echo "Environment: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
           echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
+          echo "Initial Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
           echo "Retry Apply Exit Code: ${{ steps.apply_retry.outputs.apply_retry_exit_code || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
-          echo "Final Apply Result: ${{ steps.apply_final.outputs.final }}" >> $GITHUB_STEP_SUMMARY
-          echo "APPLY_OK: ${{ steps.apply_ok.outputs.apply_ok }}" >> $GITHUB_STEP_SUMMARY
-          echo "Classification: ${{ steps.classify.outputs.classification || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
-          echo "Validation Result: ${{ steps.active_validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "Final Apply Exit Code: ${{ steps.apply_final.outputs.final_apply_exit_code || steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
+          echo "Validation Result: ${{ steps.validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "NodePort Used: ${{ steps.validate.outputs.nodeport_used || 'false' }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ github.event.inputs.enable_monitoring }}" = "true" ]; then
-            echo "Grafana OK: ${{ steps.monitoring_validate.outputs.grafana_ok || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
-            echo "Prometheus OK: ${{ steps.monitoring_validate.outputs.prometheus_ok || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
+            echo "Grafana OK: ${{ steps.validate.outputs.grafana_ok || 'false' }}" >> $GITHUB_STEP_SUMMARY
+            echo "Prometheus OK: ${{ steps.validate.outputs.prometheus_ok || 'false' }}" >> $GITHUB_STEP_SUMMARY
           fi
-          # Determine final success based on initial or retry apply
-          final_code=${{ steps.apply.outputs.apply_exit_code }}
-          if [ "${{ steps.apply_retry.outputs.apply_retry_exit_code || '1' }}" = "0" ]; then final_code=0; fi
-          if [ "${{ steps.apply_final.outputs.final }}" != "success" ]; then
-            echo "Terraform apply (initial + retry) failed; see log artifact." >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ "${{ steps.active_validate.outputs.validation_result }}" != "success" ]; then
-            echo "Validation failed (see diagnostics artifact)." >> $GITHUB_STEP_SUMMARY
-          fi
-          # Final outcome exit code
-          if [ "${{ steps.apply_ok.outputs.apply_ok }}" != "true" ] || [ "${{ steps.active_validate.outputs.validation_result }}" != "success" ]; then
-            exit 1
-          fi
+          if [ "${{ steps.apply_final.outputs.final_apply_exit_code || steps.apply.outputs.apply_exit_code }}" != "0" ] || [ "${{ steps.validate.outputs.validation_result }}" != "success" ]; then exit 1; fi
