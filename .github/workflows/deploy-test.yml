@@ -88,8 +88,13 @@ jobs:
         id: plan
         working-directory: infra
         run: |
+          # Handle potentially missing SSH key name
+          SSH_KEY_VAR=""
+          if [ -n "${{ secrets.AWS_SSH_KEY_NAME }}" ]; then
+            SSH_KEY_VAR="-var=ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME }}"
+          fi
           terraform plan \
-            -var="ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME }}" \
+            $SSH_KEY_VAR \
             -var="instance_type=${{ github.event.inputs.instance_type }}" \
             -var="k3s_node_count=${{ github.event.inputs.k3s_node_count }}" \
             -var="environment=${{ github.event.inputs.environment || 'gha-test' }}" \
@@ -102,11 +107,18 @@ jobs:
         id: apply
         working-directory: infra
         run: |
+          echo "Starting Terraform apply..."
+          echo "Instance type: ${{ github.event.inputs.instance_type }}"
+          echo "Enable monitoring: ${{ github.event.inputs.enable_monitoring }}"
           set -o pipefail
           terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
           ec=${PIPESTATUS[0]}
           echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
-          if [ $ec -ne 0 ]; then echo "[WARN] Terraform apply failed (will evaluate retry logic)" >&2; fi
+          if [ $ec -ne 0 ]; then 
+            echo "[ERROR] Terraform apply failed with exit code: $ec" >&2
+            echo "Last 50 lines of terraform-apply.log:"
+            tail -n 50 ../terraform-apply.log || true
+          fi
 
       - name: Transient retry (simple)
         id: apply_retry
