@@ -106,36 +106,43 @@ jobs:
           terraform apply -auto-approve tfplan 2>&1 | tee ../terraform-apply.log
           ec=${PIPESTATUS[0]}
           echo "apply_exit_code=$ec" >> $GITHUB_OUTPUT
-          if [ $ec -ne 0 ]; then echo "Terraform apply failed" >&2; exit $ec; fi
+          if [ $ec -ne 0 ]; then echo "[WARN] Terraform apply failed (will evaluate retry logic)" >&2; fi
 
       - name: Transient retry (simple)
         id: apply_retry
-        if: failure() && steps.apply.outputs.apply_exit_code != '0'
+        if: ${{ steps.apply.outputs.apply_exit_code != '0' }}
         working-directory: infra
         run: |
           echo "Attempting simple transient retry (throttling/IAM propagation)"
           if ! grep -qiE 'Throttling|RequestLimitExceeded|InvalidIAMInstanceProfile|NoSuchEntity|DependencyViolation|ServiceUnavailable|InternalError' ../terraform-apply.log 2>/dev/null; then
-            echo "No transient patterns detected; skipping retry"; exit 1
+            echo "No transient patterns detected; skipping retry"; echo "apply_retry_exit_code=NA" >> $GITHUB_OUTPUT; exit 0
           fi
           sleep 25
           set -o pipefail
           terraform apply -auto-approve tfplan 2>&1 | tee -a ../terraform-apply.log
           ec=${PIPESTATUS[0]}
           echo "apply_retry_exit_code=$ec" >> $GITHUB_OUTPUT
-          if [ $ec -ne 0 ]; then echo "Retry still failed" >&2; exit $ec; fi
+          if [ $ec -ne 0 ]; then echo "Retry still failed" >&2; fi
 
       - name: Set final apply status
         if: always()
         id: apply_final
         run: |
           init='${{ steps.apply.outputs.apply_exit_code }}'
-          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code || '' }}'
+          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code }}'
           final=$init
-          if [ -n "$retry" ]; then final=$retry; fi
+          if [ -n "$retry" ] && [ "$retry" != "NA" ]; then final=$retry; fi
           echo "final_apply_exit_code=$final" >> $GITHUB_OUTPUT
           echo "Final apply exit code: $final"
 
+      - name: Show terraform apply log tail (on failure)
+        if: ${{ steps.apply_final.outputs.final_apply_exit_code != '0' }}
+        run: |
+          echo "---- terraform-apply.log (last 120 lines) ----"
+          tail -n 120 terraform-apply.log || true
+
       - name: Capture Terraform outputs
+        if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
         id: tf-out
         working-directory: infra
         run: |
@@ -150,18 +157,20 @@ jobs:
           echo "instance_id=$iid" >> $GITHUB_OUTPUT
 
       - name: Echo outputs
+        if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
           echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}"
           if ! echo "${{ steps.tf-out.outputs.instance_id }}" | grep -q '^i-'; then echo "[WARN] Instance ID pattern invalid"; fi
 
       - name: Warm-up (k3s install)
+        if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           echo "Warm-up 75s for k3s core components"
           sleep 75
 
       - name: Wait monitoring components (pods/services)
-        if: ${{ github.event.inputs.enable_monitoring == 'true' }}
+        if: ${{ github.event.inputs.enable_monitoring == 'true' && steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skip monitoring wait (invalid instance id)"; exit 0; fi
@@ -180,6 +189,7 @@ jobs:
           echo "Finished monitoring pod wait"
 
       - name: Poll k3s readiness (nodes)
+        if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
         id: k3s_ready
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
@@ -197,6 +207,7 @@ jobs:
           echo "Finished k3s readiness polling"
 
       - name: Validate ingress & monitoring
+        if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
         id: validate
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
@@ -242,7 +253,7 @@ jobs:
           echo "validation_result=success" >> $GITHUB_OUTPUT
 
       - name: Fetch monitoring exposure log
-        if: ${{ always() && github.event.inputs.enable_monitoring == 'true' }}
+        if: ${{ always() && github.event.inputs.enable_monitoring == 'true' && steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Skip monitoring log fetch (invalid instance id)"; exit 0; fi
@@ -251,7 +262,7 @@ jobs:
           aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > monitoring-expose.log 2>/dev/null || echo "(no monitoring expose log)" > monitoring-expose.log
 
       - name: SSM diagnostics on validation failure
-        if: failure()
+        if: ${{ failure() && steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skip diagnostics (invalid instance id)"; exit 0; fi
@@ -262,14 +273,14 @@ jobs:
           echo "Saved validation-ssm-curl.txt"
 
       - name: Fetch EC2 console output
-        if: always()
+        if: ${{ always() && steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Skip console output (invalid instance id)"; exit 0; fi
           aws ec2 get-console-output --instance-id "$iid" --latest --output text > console-output.txt 2>/dev/null || echo "(No console output)" > console-output.txt
 
       - name: Minimal SSM diagnostics (always)
-        if: always()
+        if: ${{ always() && steps.apply_final.outputs.final_apply_exit_code == '0' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ] || ! echo "$iid" | grep -q '^i-'; then echo "Skip SSM diagnostics (invalid instance id)"; exit 0; fi
@@ -294,7 +305,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Terraform Destroy (cleanup)
-        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply.outputs.apply_exit_code == '0' && steps.validate.outputs.validation_result == 'success')) }}
+        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply_final.outputs.final_apply_exit_code == '0' && steps.validate.outputs.validation_result == 'success')) }}
         working-directory: infra
         run: terraform destroy -auto-approve
 
@@ -307,10 +318,15 @@ jobs:
           echo "Initial Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
           echo "Retry Apply Exit Code: ${{ steps.apply_retry.outputs.apply_retry_exit_code || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
           echo "Final Apply Exit Code: ${{ steps.apply_final.outputs.final_apply_exit_code || steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
-          echo "Validation Result: ${{ steps.validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
-          echo "NodePort Used: ${{ steps.validate.outputs.nodeport_used || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.apply_final.outputs.final_apply_exit_code }}" = "0" ]; then
+            echo "Validation Result: ${{ steps.validate.outputs.validation_result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+            echo "NodePort Used: ${{ steps.validate.outputs.nodeport_used || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Validation Result: skipped (apply failed)" >> $GITHUB_STEP_SUMMARY
+          fi
           if [ "${{ github.event.inputs.enable_monitoring }}" = "true" ]; then
             echo "Grafana OK: ${{ steps.validate.outputs.grafana_ok || 'false' }}" >> $GITHUB_STEP_SUMMARY
             echo "Prometheus OK: ${{ steps.validate.outputs.prometheus_ok || 'false' }}" >> $GITHUB_STEP_SUMMARY
           fi
-          if [ "${{ steps.apply_final.outputs.final_apply_exit_code || steps.apply.outputs.apply_exit_code }}" != "0" ] || [ "${{ steps.validate.outputs.validation_result }}" != "success" ]; then exit 1; fi
+          if [ "${{ steps.apply_final.outputs.final_apply_exit_code || steps.apply.outputs.apply_exit_code }}" != "0" ]; then exit 1; fi
+          if [ "${{ steps.validate.outputs.validation_result }}" != "success" ]; then exit 1; fi
