@@ -172,8 +172,18 @@ jobs:
           echo "apply_retry_exit_code=${{ steps.apply_retry.outputs.apply_retry_exit_code || 'none' }}"
           echo "final=${{ steps.apply_final.outputs.final }}"
 
+      - name: Evaluate Apply Success (APPLY_OK)
+        id: apply_ok
+        run: |
+          init='${{ steps.apply.outputs.apply_exit_code }}'
+          retry='${{ steps.apply_retry.outputs.apply_retry_exit_code }}'
+          if [ "$init" = "0" ] || [ "$retry" = "0" ]; then ok=true; else ok=false; fi
+          echo "APPLY_OK=$ok" >> $GITHUB_ENV
+          echo "apply_ok=$ok" >> $GITHUB_OUTPUT
+          echo "Computed APPLY_OK=$ok (init=$init retry=${retry:-n/a})"
+
       - name: Capture Outputs
-        if: ${{ steps.apply_final.outputs.final == 'success' }}
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
         id: tf-out
         working-directory: infra
         run: |
@@ -181,19 +191,19 @@ jobs:
           echo "instance_id=$(terraform output -raw server_instance_id)" >> $GITHUB_OUTPUT || echo "instance_id=UNKNOWN" >> $GITHUB_OUTPUT
 
       - name: Echo Terraform outputs
-        if: ${{ steps.apply_final.outputs.final == 'success' }}
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
 
       - name: Initial warm-up wait
-        if: ${{ steps.apply_final.outputs.final == 'success' }}
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           echo "Extended warm-up (120s) to allow k3s install + core pods (IP: $ip)"
           sleep 120
 
       - name: Poll k3s readiness via SSM
-        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_final.outputs.final == 'success' }}
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
         id: k3s_ready
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
@@ -216,7 +226,7 @@ jobs:
           echo "Finished k3s readiness polling phase"
 
       - name: Poll k3s readiness marker (SSM)
-        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_final.outputs.final == 'success' }}
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           if [ -z "$iid" ] || [ "$iid" = "UNKNOWN" ]; then echo "Unknown instance id; skipping marker poll"; exit 0; fi
@@ -232,10 +242,21 @@ jobs:
           done
           echo "Marker not detected within timeout"
 
+      - name: Pre-validation service snapshot (SSM)
+        if: ${{ steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' }}
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          [ -z "$iid" ] && echo "No instance id for snapshot" && exit 0
+          echo "Collecting pre-validation snapshot via SSM"
+          CID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== pre-validation kubectl get nodes ====="; k3s kubectl get nodes -o wide || true; echo "===== pre-validation kubectl get pods -A (top 40) ====="; k3s kubectl get pods -A -o wide 2>/dev/null | head -n 40 || true; echo "===== pre-validation kubectl get svc -A ====="; k3s kubectl get svc -A || true; echo "===== pre-validation kubectl get ingress -A ====="; k3s kubectl get ingress -A || true; echo "===== tail cloud-init-output.log (120) ====="; tail -n 120 /var/log/cloud-init-output.log || true;' --query 'Command.CommandId' --output text || true)
+          sleep 6
+          aws ssm get-command-invocation --command-id "$CID" --instance-id "$iid" --query 'StandardOutputContent' --output text > pre-validation-snapshot.txt 2>/dev/null || true
+          echo "Pre-validation snapshot captured (size $(wc -c < pre-validation-snapshot.txt 2>/dev/null || echo 0) bytes)"
+
       - name: Active endpoint validation (Ingress + NodePort)
         id: active_validate
         continue-on-error: true
-        if: ${{ steps.apply_final.outputs.final == 'success' }}
+        if: ${{ steps.apply_ok.outputs.apply_ok == 'true' }}
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
           attempts=${{ github.event.inputs.readiness_attempts }}
@@ -251,7 +272,7 @@ jobs:
           fi
 
       - name: SSM in-cluster curl diagnostics (on validation failure)
-        if: ${{ failure() && steps.detect.outputs.aws == 'true' && steps.apply_final.outputs.final == 'success' && steps.active_validate.outputs.validation_result != 'success' }}
+        if: ${{ failure() && steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result != 'success' }}
         run: |
           iid=${{ steps.tf-out.outputs.instance_id }}
           [ -z "$iid" ] && echo "No instance id for SSM diagnostics" && exit 0
@@ -363,7 +384,7 @@ jobs:
           fi
 
       - name: Terraform Destroy (ephemeral cleanup)
-        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply_final.outputs.final == 'success' && steps.active_validate.outputs.validation_result == 'success')) }}
+        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result == 'success')) }}
         working-directory: infra
         run: terraform destroy -auto-approve
 
@@ -379,6 +400,7 @@ jobs:
           echo "Apply Exit Code: ${{ steps.apply.outputs.apply_exit_code }}" >> $GITHUB_STEP_SUMMARY
           echo "Retry Apply Exit Code: ${{ steps.apply_retry.outputs.apply_retry_exit_code || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
           echo "Final Apply Result: ${{ steps.apply_final.outputs.final }}" >> $GITHUB_STEP_SUMMARY
+          echo "APPLY_OK: ${{ steps.apply_ok.outputs.apply_ok }}" >> $GITHUB_STEP_SUMMARY
           echo "Classification: ${{ steps.classify.outputs.classification || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
           echo "Validation Result: ${{ steps.active_validate.outputs.validation_result || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
           # Determine final success based on initial or retry apply
@@ -391,6 +413,6 @@ jobs:
             echo "Validation failed (see diagnostics artifact)." >> $GITHUB_STEP_SUMMARY
           fi
           # Final outcome exit code
-          if [ "${{ steps.apply_final.outputs.final }}" != "success" ] || [ "${{ steps.active_validate.outputs.validation_result }}" != "success" ]; then
+          if [ "${{ steps.apply_ok.outputs.apply_ok }}" != "true" ] || [ "${{ steps.active_validate.outputs.validation_result }}" != "success" ]; then
             exit 1
           fi
