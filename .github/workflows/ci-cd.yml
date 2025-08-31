@@ -19,17 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Derive sanitized dir name
-        id: dir_meta
-        run: |
-          raw="${{ matrix.terraform-dir }}"
-          safe="${raw//\//-}"
-          echo "sanitized=$safe" >> "$GITHUB_OUTPUT"
-        shell: bash
-
-      - name: Export sanitized dir env
-        run: echo "SANITIZED_DIR=${{ steps.dir_meta.outputs.sanitized }}" >> $GITHUB_ENV
-
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
@@ -91,6 +80,12 @@ jobs:
             type=ref,event=pr
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Show resolved image tags
+        run: |
+          echo "Image name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "Tags:"
+          echo '${{ steps.meta.outputs.tags }}' | tr ' ' '\n'
 
       - name: Build and push Docker image
         id: build
