@@ -8,15 +8,7 @@ on:
         required: false
         default: t3.small
       keep_resources:
-        description: 'Keep resources after te            for ((i=1; i<=10; i++)); do
-              g=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30030/" || echo 000)
-              p=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30900/" || echo 000)
-              echo "Mon Attempt $i grafana=$g prometheus=$p"
-              [[ $g =~ ^(200|302|401)$ ]] && graf=true
-              [[ $p =~ ^(200|405)$ ]] && prom=true
-              if [ "$graf" = true ] && [ "$prom" = true ]; then break; fi
-              sleep 6
-            donefalse)'
+        description: 'Keep resources after test (true/false)'
         required: false
         default: 'false'
       k3s_node_count:
