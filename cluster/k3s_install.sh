@@ -437,6 +437,13 @@ finalize_installation() {
     echo "[INFO] Services available (once pods ready):"
     echo "  - Hello World: http://$ip/"
     [ "${ENABLE_MONITORING}" = "true" ] && echo "  - Prometheus/Grafana via NodePorts (cluster-local)"
+    if [ -f /var/log/k3s_diagnostics_hello_world.txt ]; then
+      echo "[INFO] === Embedded Hello World diagnostics snapshot (truncated to 300 lines) ==="
+      tail -n 300 /var/log/k3s_diagnostics_hello_world.txt || true
+      echo "[INFO] === End diagnostics snapshot ==="
+    else
+      echo "[INFO] Diagnostics snapshot file not found yet."
+    fi
   else
     echo "[SUCCESS] k3s agent installation completed!"
   fi
