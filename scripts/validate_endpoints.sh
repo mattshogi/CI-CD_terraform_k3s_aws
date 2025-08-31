@@ -3,9 +3,10 @@
 
 set -euo pipefail
 
-SERVER_IP="$1"
-RETRIES=10
-SLEEP=30
+SERVER_IP="${1:-}"
+HELLO_NODE_PORT="${HELLO_NODE_PORT:-30080}"
+RETRIES=${RETRIES:-30}
+SLEEP=${SLEEP:-10}
 
 if [ -z "$SERVER_IP" ]; then
   echo "Usage: $0 <server_public_ip>"
@@ -15,19 +16,28 @@ fi
 echo "[INFO] Validating service endpoints on $SERVER_IP"
 
 # Test Hello World service
-echo "[INFO] Testing Hello World service..."
+echo "[INFO] Testing Hello World service (Ingress + NodePort fallback)..."
+hello_ok=false
 for i in $(seq 1 $RETRIES); do
-  echo "Attempt $i/$RETRIES: Checking Hello World..."
-  if curl -fsSL --max-time 10 "http://$SERVER_IP/" | grep -q "Hello"; then
-    echo "[SUCCESS] Hello World is reachable!"
-    break
-  elif [ $i -eq $RETRIES ]; then
-    echo "[ERROR] Hello World not reachable after $RETRIES attempts"
-    exit 1
+  echo "Attempt $i/$RETRIES: Ingress /"
+  if curl -fsSL --max-time 10 "http://$SERVER_IP/" | grep -qi "Hello"; then
+    echo "[SUCCESS] Ingress root returned Hello"
+    hello_ok=true; break
   fi
-  echo "Waiting ${SLEEP}s before retry..."
-  sleep $SLEEP
+  echo "Attempt $i/$RETRIES: NodePort :$HELLO_NODE_PORT/"
+  if curl -fsSL --max-time 10 "http://$SERVER_IP:$HELLO_NODE_PORT/" | grep -qi "Hello"; then
+    echo "[SUCCESS] NodePort returned Hello"
+    hello_ok=true; break
+  fi
+  if [ $i -lt $RETRIES ]; then
+    echo "Waiting ${SLEEP}s before retry..."
+    sleep $SLEEP
+  fi
 done
+if [ "$hello_ok" != true ]; then
+  echo "[ERROR] Hello World not reachable via Ingress or NodePort after $RETRIES attempts" >&2
+  exit 1
+fi
 
 # Test Prometheus (optional)
 echo "[INFO] Testing Prometheus..."

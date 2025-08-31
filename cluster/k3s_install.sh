@@ -128,6 +128,31 @@ install_k3s() {
   fi
 }
 
+wait_for_traefik() {
+  if [ "${ENABLE_INGRESS_NGINX}" = "true" ]; then
+    # Using nginx instead; skip traefik wait
+    return 0
+  fi
+  echo "[INFO] Waiting for Traefik ingress controller pods to be Ready..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  local timeout=300
+  local waited=0
+  while true; do
+    # Try multiple label selectors seen in k3s distributions
+    ready_count=$(k3s kubectl get pods -n kube-system -l app=traefik --no-headers 2>/dev/null | awk '$2 ~ /1\/1/ {c++} END{print c+0}')
+    total_count=$(k3s kubectl get pods -n kube-system -l app=traefik --no-headers 2>/dev/null | wc -l || echo 0)
+    if [ "$total_count" -gt 0 ] && [ "$ready_count" -eq "$total_count" ]; then
+      echo "[INFO] Traefik pods Ready ($ready_count/$total_count)"
+      break
+    fi
+    if [ $waited -ge $timeout ]; then
+      echo "[WARN] Traefik pods not all Ready after ${timeout}s; continuing anyway"
+      break
+    fi
+    sleep 5; waited=$((waited+5))
+  done
+}
+
 setup_helm_repos() {
   if [ "${NODE_INDEX:-0}" != "0" ]; then
     echo "[INFO] Skipping Helm setup on agent node"
@@ -476,6 +501,7 @@ main() {
     setup_helm_repos
     install_ingress
     install_monitoring
+  wait_for_traefik
   expose_monitoring
     deploy_hello_world
   fi
