@@ -335,79 +335,7 @@ spec:
 EOF
   echo "[INFO] Hello World application deployed"
 
-  # Create a minimal ConfigMap + additional deployment to ensure root path always returns something
-  cat <<'EOF' | k3s kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: root-index
-  namespace: hello-world
-data:
-  index.html: |
-    <html><body><h1>Hello World (Traefik)</h1><p>Root index served at $(date)</p></body></html>
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: root-index
-  namespace: hello-world
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: root-index
-  template:
-    metadata:
-      labels:
-        app: root-index
-    spec:
-      containers:
-      - name: web
-        image: nginx:1.27-alpine
-        ports:
-        - containerPort: 80
-        volumeMounts:
-        - name: html
-          mountPath: /usr/share/nginx/html
-      volumes:
-      - name: html
-        configMap:
-          name: root-index
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: root-index
-  namespace: hello-world
-spec:
-  selector:
-    app: root-index
-  ports:
-  - port: 80
-    targetPort: 80
-    protocol: TCP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: root-index
-  namespace: hello-world
-  annotations:
-    kubernetes.io/ingress.class: traefik
-spec:
-  ingressClassName: traefik
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: root-index
-            port:
-              number: 80
-EOF
-  echo "[INFO] Root index deployment created"
+  echo "[INFO] Root index deployment removed (using single hello-world ingress)"
 
   echo "[INFO] Waiting for Hello World pods to become Ready..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -468,6 +396,20 @@ FALLBACK
   node_ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
   echo "  - Ingress (traefik): http://${node_ip}/"
   echo "  - NodePort:          http://${node_ip}:${HELLO_NODE_PORT}/"
+
+  echo "[INFO] Waiting for service endpoints registration..."
+  local ep_wait=0
+  while [ $ep_wait -lt 120 ]; do
+    if k3s kubectl get ep -n hello-world hello-world -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null | grep -qE '.'; then
+      echo "[INFO] Endpoints detected for hello-world service"; break
+    fi
+    sleep 5; ep_wait=$((ep_wait+5))
+  done
+
+  echo "[INFO] Performing in-cluster curl test via NodePort (loopback)..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -s -m 5 "http://127.0.0.1:${HELLO_NODE_PORT}/" | head -n1 || true
+  fi
 }
 
 finalize_installation() {
