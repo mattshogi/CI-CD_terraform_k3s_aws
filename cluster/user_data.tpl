@@ -19,16 +19,34 @@ touch /tmp/user-data-test/marker
 
 echo "[INFO] user-data: starting installer (node_index=$NODE_INDEX)"
 
-# Create installer script inline (more reliable than downloading)
+# Fetch installer with retries; fallback to embedded minimal installer if download fails
 if [ -n "$${INSTALL_SCRIPT_URL:-}" ]; then
-	echo "[INFO] Downloading installer from $${INSTALL_SCRIPT_URL}"
-	curl -fsSL "$${INSTALL_SCRIPT_URL}" -o /tmp/k3s_install.sh
+	echo "[INFO] Attempting to download installer from $${INSTALL_SCRIPT_URL}"
+	for attempt in 1 2 3; do
+		if curl -fsSL "$${INSTALL_SCRIPT_URL}" -o /tmp/k3s_install.sh; then
+			echo "[INFO] Installer downloaded successfully (attempt $attempt)"; break
+		else
+			echo "[WARN] Download attempt $attempt failed"
+			sleep $((attempt*2))
+		fi
+	done
+	if [ ! -s /tmp/k3s_install.sh ]; then
+		echo "[ERROR] Failed to download installer after retries; using embedded minimal fallback" >&2
+		cat > /tmp/k3s_install.sh <<'FALLBACK'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "[FALLBACK] Running minimal fallback installer"
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode=644" sh -s - server
+echo "[FALLBACK] k3s install attempted; creating readiness marker"
+touch /tmp/k3s-ready || true
+FALLBACK
+	fi
 else
-	echo "[ERROR] INSTALL_SCRIPT_URL not provided" >&2
+	echo "[ERROR] INSTALL_SCRIPT_URL not provided; aborting (no fallback for explicit missing URL)" >&2
 	exit 1
 fi
 
-chmod +x /tmp/k3s_install.sh
+chmod +x /tmp/k3s_install.sh || true
 
 # Export variables for the installer
 export NODE_INDEX SERVER_IP K3S_TOKEN ENABLE_MONITORING ENABLE_INGRESS_NGINX APP_IMAGE HELLO_NODE_PORT INSTALL_SCRIPT_URL INSTALL_DOCKER
