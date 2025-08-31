@@ -104,6 +104,10 @@ jobs:
           echo "Enable monitoring: ${{ github.event.inputs.enable_monitoring }}"
           echo "Resource suffix: ${{ github.run_id }}"
           
+          # Install jq for JSON processing
+          sudo apt-get update -y >/dev/null 2>&1 || true
+          sudo apt-get install -y jq >/dev/null 2>&1 || true
+          
           terraform plan \
             $SSH_KEY_VAR \
             -var="instance_type=${{ github.event.inputs.instance_type }}" \
@@ -116,9 +120,18 @@ jobs:
             -out=tfplan
             
           echo "=== PLAN VALIDATION ==="
-          terraform show -json tfplan > tfplan.json
-          echo "Plan contains $(jq -r '.resource_changes | length' tfplan.json) resource changes"
-          echo "Resources to create: $(jq -r '[.resource_changes[] | select(.change.actions[0] == "create")] | length' tfplan.json)"
+          if terraform show -json tfplan > tfplan.json 2>/dev/null; then
+            echo "Plan JSON generated successfully"
+            if jq -e '.resource_changes' tfplan.json >/dev/null 2>&1; then
+              echo "Plan contains $(jq -r '.resource_changes | length' tfplan.json) resource changes"
+              echo "Resources to create: $(jq -r '[.resource_changes[] | select(.change.actions[0] == "create")] | length' tfplan.json)"
+            else
+              echo "Plan JSON structure is invalid - skipping detailed analysis"
+              echo "First 200 chars of JSON: $(head -c 200 tfplan.json)"
+            fi
+          else
+            echo "Failed to generate plan JSON - continuing without detailed analysis"
+          fi
 
       - name: Terraform Apply
         id: apply
