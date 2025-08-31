@@ -293,6 +293,8 @@ kind: Ingress
 metadata:
   name: hello-world
   namespace: hello-world
+  annotations:
+    kubernetes.io/ingress.class: traefik
 spec:
   ingressClassName: traefik
   rules:
@@ -307,6 +309,80 @@ spec:
               number: 80
 EOF
   echo "[INFO] Hello World application deployed"
+
+  # Create a minimal ConfigMap + additional deployment to ensure root path always returns something
+  cat <<'EOF' | k3s kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: root-index
+  namespace: hello-world
+data:
+  index.html: |
+    <html><body><h1>Hello World (Traefik)</h1><p>Root index served at $(date)</p></body></html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: root-index
+  namespace: hello-world
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: root-index
+  template:
+    metadata:
+      labels:
+        app: root-index
+    spec:
+      containers:
+      - name: web
+        image: nginx:1.27-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: html
+        configMap:
+          name: root-index
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: root-index
+  namespace: hello-world
+spec:
+  selector:
+    app: root-index
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: root-index
+  namespace: hello-world
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  ingressClassName: traefik
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: root-index
+            port:
+              number: 80
+EOF
+  echo "[INFO] Root index deployment created"
 
   echo "[INFO] Waiting for Hello World pods to become Ready..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
