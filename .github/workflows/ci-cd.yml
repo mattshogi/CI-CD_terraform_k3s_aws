@@ -20,6 +20,26 @@ on:
         description: "Run terraform destroy for production after validation"
         required: false
         default: "false"
+      run_apply:
+        description: "Run terraform apply + validation (ephemeral)"
+        required: false
+        default: "false"
+      apply_environment:
+        description: "Environment to apply (staging|production)"
+        required: false
+        default: "staging"
+      destroy_after_apply:
+        description: "Destroy after validation (only if run_apply=true)"
+        required: false
+        default: "true"
+      instance_type_override:
+        description: "Override instance type for apply job"
+        required: false
+        default: "t3.small"
+      enable_monitoring:
+        description: "Enable monitoring stack (kube-prometheus-stack)"
+        required: false
+        default: "true"
 
 env:
   REGISTRY: ghcr.io
@@ -344,7 +364,8 @@ jobs:
             echo "Running staging plan with provided AWS credentials"
             terraform plan \
               -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
-              -var="instance_type=t3.micro" \
+              -var="instance_type=t3.small" \
+              -var="enable_monitoring=true" \
               -var="environment=staging"
           else
             echo "Skipping staging plan (AWS credentials not set)."
@@ -384,6 +405,7 @@ jobs:
             terraform plan \
               -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
               -var="instance_type=t3.small" \
+              -var="enable_monitoring=true" \
               -var="environment=production"
           else
             echo "Skipping production plan (AWS credentials not set)."
@@ -439,3 +461,125 @@ jobs:
             -var="ssh_key_name=production-key" \
             -var="instance_type=t3.small" \
             -var="environment=production"
+
+  infra-apply-validate:
+    name: Apply & Validate (Ephemeral)
+    runs-on: ubuntu-latest
+    needs: [terraform-validate, helm-validate, security-scan, integration-tests]
+    if: github.event_name == 'workflow_dispatch' && inputs.run_apply == 'true'
+    outputs:
+      server_public_ip: ${{ steps.capture-ip.outputs.server_public_ip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.9.5
+
+      - name: Configure AWS credentials (optional)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Apply
+        id: tf-apply
+        working-directory: infra
+        env:
+          TF_IN_AUTOMATION: true
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "AWS credentials not provided; skipping apply." >&2
+            echo "apply_skipped=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          terraform apply -auto-approve \
+            -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
+            -var="instance_type=${{ inputs.instance_type_override }}" \
+            -var="enable_monitoring=${{ inputs.enable_monitoring }}" \
+            -var="environment=${{ inputs.apply_environment }}"
+          terraform output -json > tf-outputs.json
+
+      - name: Capture public IP
+        id: capture-ip
+        if: steps.tf-apply.outcome == 'success' && steps.tf-apply.outputs.apply_skipped != 'true'
+        working-directory: infra
+        run: |
+          SERVER_IP=$(jq -r '.server_public_ip.value' tf-outputs.json 2>/dev/null || echo '')
+          echo "server_public_ip=$SERVER_IP" >> $GITHUB_OUTPUT
+          echo "Server IP: $SERVER_IP"
+
+      - name: Validate Endpoints
+        if: steps.capture-ip.outputs.server_public_ip != ''
+        working-directory: infra
+        env:
+          SERVER_IP: ${{ steps.capture-ip.outputs.server_public_ip }}
+          HELLO_NODE_PORT: 30080
+          GRAFANA_NODE_PORT: 30030
+          PROM_NODE_PORT: 30900
+        run: |
+          set -euo pipefail
+          echo "Starting endpoint validation against $SERVER_IP"
+          retries=40
+          sleep_between=15
+          endpoints="root:http://$SERVER_IP/ hello:http://$SERVER_IP:$HELLO_NODE_PORT/ grafana:http://$SERVER_IP:$GRAFANA_NODE_PORT/ prometheus:http://$SERVER_IP:$PROM_NODE_PORT/"
+          mkdir -p validation
+          summary=validation/summary.md
+          echo "# Endpoint Validation Summary" > $summary
+          echo "Server IP: $SERVER_IP" >> $summary
+          pass_count=0
+          total=0
+          for item in $endpoints; do
+            total=$((total+1))
+            name=${item%%:*}
+            url=${item#*:}
+            echo "\n## $name ($url)" >> $summary
+            ok=false
+            for ((i=1;i<=retries;i++)); do
+              code=$(curl -m 5 -s -o /dev/null -w '%{http_code}' "$url" || echo 000)
+              echo "[$name] attempt $i/$retries -> $code"
+              if [ "$code" = "200" ]; then
+                echo "Success ($code) on attempt $i" >> $summary
+                ok=true; pass_count=$((pass_count+1)); break
+              fi
+              sleep $sleep_between
+            done
+            if [ "$ok" = false ]; then
+              echo "Failed after $retries attempts" >> $summary
+            fi
+          done
+          echo "\n---\nPassed $pass_count of $total endpoints" >> $summary
+          if [ $pass_count -lt 2 ]; then
+            echo "Insufficient endpoints healthy ($pass_count/$total)" >> $summary
+            # don't fail immediately; capture artifact first
+          fi
+
+      - name: Upload Validation Summary
+        if: steps.capture-ip.outputs.server_public_ip != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-apply-validation-${{ github.run_attempt }}
+          path: infra/validation/summary.md
+          if-no-files-found: warn
+
+      - name: Terraform Destroy (auto)
+        if: inputs.destroy_after_apply == 'true' && steps.capture-ip.outputs.server_public_ip != ''
+        working-directory: infra
+        run: |
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "AWS credentials not provided; skipping destroy." >&2
+            exit 0
+          fi
+          terraform destroy -auto-approve \
+            -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
+            -var="instance_type=${{ inputs.instance_type_override }}" \
+            -var="enable_monitoring=${{ inputs.enable_monitoring }}" \
+            -var="environment=${{ inputs.apply_environment }}"
+

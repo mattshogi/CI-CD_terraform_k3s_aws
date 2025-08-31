@@ -11,7 +11,7 @@ Lightweight DevOps deployment demonstrating modern infrastructure practices with
 - **Infrastructure**: Terraform + AWS (VPC, EC2, Security Groups)
 - **Container Orchestration**: k3s (lightweight Kubernetes)
 - **Container Runtime**: Docker + containerd
-- **Service Mesh**: nginx Ingress Controller
+- **Ingress**: Traefik (default) or optional nginx Ingress Controller
 - **Monitoring**: Prometheus + Grafana
 - **CI/CD**: GitHub Actions
 - **Application**: Go-based Hello World service
@@ -58,14 +58,62 @@ terraform -chdir=infra output server_public_ip
 
 ### GitHub Actions Deployment
 
-Configure these repository secrets:
+Primary workflow: `.github/workflows/ci-cd.yml`
+
+Jobs include:
+
+1. Go build & test
+2. Docker image build & push (GHCR)
+3. Terraform fmt / validate + TFLint
+4. Helm lint / template
+5. Security scan (Trivy) with gating on CRITICAL vulns
+6. Integration tests (scripts)
+7. (Main branch) Staging plan (no apply by default)
+8. (Dispatch / tags) Production plan
+9. Optional destroy jobs (dispatch inputs)
+10. Ephemeral Apply & Validate (new) — run `terraform apply`, wait, HTTP validate endpoints, optionally auto-destroy
+
+Ephemeral apply is triggered via `workflow_dispatch` inputs:
+
+Inputs of interest:
+
+- `run_apply` (true/false) — enable infra apply & validation
+- `apply_environment` (staging|production label tag)
+- `instance_type_override` (default t3.small)
+- `enable_monitoring` (true/false)
+- `destroy_after_apply` (true/false) — auto teardown after validation
+
+Outputs / artifacts:
+
+- `server_public_ip` (job output)
+- `infra-apply-validation-<run_attempt>` artifact containing `validation/summary.md`
+
+Validation performs repeated curl checks against:
+
+- Root ingress (`http://<ip>/`)
+- Hello NodePort (`:<30080>/`)
+- Grafana NodePort (`:30030/` when monitoring enabled)
+- Prometheus NodePort (`:30900/` when monitoring enabled)
+
+Configure these repository secrets (names must match workflows):
 
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `SSH_KEY_NAME` (your EC2 key pair name)
-- `SSH_PRIVATE_KEY` (private key content for validation)
+- `AWS_SSH_KEY_NAME` (EC2 key pair name)  
+- `SSH_PRIVATE_KEY` (optional: for SSH diagnostics; corresponds to the public part of `AWS_SSH_KEY_NAME`)
 
-Then manually trigger the "Deploy k3s Cluster" workflow.
+Optional secrets / variables:
+
+- `AWS_DEFAULT_REGION` (default `us-east-1` if omitted)
+- `VULN_CRITICAL_THRESHOLD` (security gating; default 0)
+
+Ephemeral apply usage:
+
+1. Go to Actions → `CI/CD Pipeline` → Run workflow
+2. Set `run_apply=true` (and adjust other inputs as needed)
+3. Wait for `infra-apply-validate` job; note `server_public_ip` in job summary
+4. Download validation artifact for endpoint results
+5. If you set `destroy_after_apply=false`, remember to manually destroy later (`terraform destroy` or rerun with destroy flags)
 
 ## Project Structure
 
@@ -86,20 +134,21 @@ Then manually trigger the "Deploy k3s Cluster" workflow.
 
 ## Services Access
 
-After deployment, access services via the EC2 public IP:
+After deployment (t3.small recommended when monitoring):
 
-- **Hello World**: `http://<public_ip>/`
-- **Prometheus**: `http://<public_ip>:9090`
-- **Grafana**: `http://<public_ip>:3000` (admin/admin)
+- **Hello World (Ingress)**: `http://<public_ip>/`
+- **Hello World (NodePort)**: `http://<public_ip>:30080/`
+- **Grafana (NodePort)**: `http://<public_ip>:30030/` (admin/admin; only if monitoring enabled)
+- **Prometheus (NodePort)**: `http://<public_ip>:30900/` (only if monitoring enabled)
 
 ## Cost Optimization
 
-This project is designed for AWS Free Tier:
+Cost notes:
 
-- Uses `t3.micro` instances by default
-- Single-node k3s cluster (no additional agents)
-- Minimal resource allocations for monitoring stack
-- Clean teardown with `terraform destroy`
+- `t3.micro` works for bare cluster + app
+- Use `t3.small` (or larger) when `enable_monitoring=true` to avoid memory pressure / API timeouts
+- Single-node keeps cost minimal
+- Always destroy ephemeral infra you no longer need
 
 ## Validation Scripts
 
@@ -119,8 +168,10 @@ terraform -chdir=infra destroy
 ### Common Issues
 
 1. **SSH Key Issues**: Ensure your EC2 key pair exists and private key is accessible
-2. **Instance Size**: If monitoring stack fails, try `t3.small` instead of `t3.micro`
+2. **Instance Size / OOM**: Monitoring on `t3.micro` may cause k3s API instability — prefer `t3.small`+
 3. **VPC Limits**: Use existing VPC by setting `vpc_id` in terraform.tfvars
+4. **user_data Size**: Large inline scripts exceed 16KB; this repo fetches installer via `install_script_url` to stay small
+5. **Terraform Template Escapes**: Use `$${VAR}` inside `templatefile()` for bash parameter expansions
 
 ### Logs
 
@@ -163,9 +214,15 @@ This tests:
 
 ### CI/CD Workflow
 
-The GitHub Actions workflow:
+The `ci-cd.yml` workflow high-level flow:
 
-1. **Plan**: Runs `terraform plan` on every push
-2. **Apply**: Runs `terraform apply` only on manual trigger
-3. **Validate**: Tests endpoints and cluster health
-4. **Cleanup**: Optional destroy step (manual only)
+1. Build & test Go
+2. Build & push image
+3. Terraform / Helm lint & validate
+4. Security scan (Trivy)
+5. Integration tests
+6. Staging / production plan (no apply by default)
+7. Optional ephemeral apply & endpoint validation (dispatch input)
+8. Optional destroy jobs
+
+Endpoint validation summary artifact provides quick pass/fail on service availability.
