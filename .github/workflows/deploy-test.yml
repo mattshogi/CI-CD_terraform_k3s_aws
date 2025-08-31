@@ -170,6 +170,38 @@ jobs:
           aws ec2 get-console-output --instance-id "$iid" --latest --output text > console-output.txt 2>/dev/null || echo "(No console output yet)" > console-output.txt
           ls -l console-output.txt
 
+      - name: SSM diagnostics (no SSH key)
+        if: always() && env.HAS_AWS_CREDS == 'true' && env.HAS_SSH_KEY != 'true'
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          if [ "$iid" = "UNKNOWN" ]; then echo "Instance ID unknown, skipping SSM diagnostics"; exit 0; fi
+          echo "Sending SSM diagnostics command to $iid"
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$iid" \
+            --document-name AWS-RunShellScript \
+            --comment "Collect k3s diagnostics" \
+            --parameters commands='#!/bin/bash
+            set -x
+            echo "===== tail cloud-init-output.log (400 lines) ====="; tail -n 400 /var/log/cloud-init-output.log 2>&1 || true;
+            if [ -f /var/log/k3s_diagnostics_hello_world.txt ]; then echo "===== k3s_diagnostics_hello_world.txt (200 lines) ====="; tail -n 200 /var/log/k3s_diagnostics_hello_world.txt; fi;
+            echo "===== kubectl get nodes -o wide ====="; sudo k3s kubectl get nodes -o wide 2>&1 || true;
+            echo "===== kubectl get pods -A -o wide ====="; sudo k3s kubectl get pods -A -o wide 2>&1 || true;
+            echo "===== kubectl get svc -A ====="; sudo k3s kubectl get svc -A 2>&1 || true;
+            echo "===== kubectl get ingress -A ====="; sudo k3s kubectl get ingress -A 2>&1 || true;
+            echo "===== kubectl describe ingress hello-world -n hello-world ====="; sudo k3s kubectl describe ingress hello-world -n hello-world 2>&1 || true;
+            ' \
+            --query 'Command.CommandId' --output text)
+          echo "Command ID: $CMD_ID"
+          # Poll status
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query 'CommandInvocations[0].Status' --output text || echo "Unknown")
+            echo "SSM command status: $STATUS"
+            if [ "$STATUS" = "Success" ] || [ "$STATUS" = "Failed" ]; then break; fi
+            sleep 6
+          done
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > ssm-diagnostics.txt 2>/dev/null || echo "(No SSM output)" > ssm-diagnostics.txt
+          echo "SSM diagnostics captured (size $(wc -c < ssm-diagnostics.txt) bytes)"
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -179,6 +211,7 @@ jobs:
             infra/terraform.tfstate
             diagnostics.txt
             console-output.txt
+            ssm-diagnostics.txt
           if-no-files-found: warn
 
       - name: Terraform Destroy (ephemeral cleanup)
