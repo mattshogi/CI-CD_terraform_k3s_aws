@@ -298,13 +298,19 @@ jobs:
           sleep_between=10
           success_graf=false
             success_prom=false
+          stability_needed=3
+          stable_graf=0; stable_prom=0
+          ok_code() { code=$1; if echo "$code" | grep -qE '^(2|3)[0-9][0-9]$'; then return 0; fi; [ "$code" = "401" ] && return 0; return 1; }
           for i in $(seq 1 $retries); do
             code_graf=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30030/" || echo 000)
             code_prom=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30900/" || echo 000)
             echo "Attempt $i: Grafana=$code_graf Prometheus=$code_prom"
-            if [ "$code_graf" = "200" ]; then success_graf=true; fi
-            if [ "$code_prom" = "200" ]; then success_prom=true; fi
-            if [ "$success_graf" = true ] && [ "$success_prom" = true ]; then break; fi
+            if ok_code "$code_graf"; then success_graf=true; stable_graf=$((stable_graf+1)); else stable_graf=0; fi
+            if ok_code "$code_prom"; then success_prom=true; stable_prom=$((stable_prom+1)); else stable_prom=0; fi
+            if [ $stable_graf -ge $stability_needed ] && [ $stable_prom -ge $stability_needed ]; then
+              echo "Both monitoring endpoints returned acceptable codes for $stability_needed consecutive attempts"
+              break
+            fi
             sleep $sleep_between
           done
           echo "grafana_ok=$success_graf" >> $GITHUB_OUTPUT
@@ -313,6 +319,16 @@ jobs:
             echo "One or both monitoring endpoints not reachable (grafana=$success_graf prometheus=$success_prom)" >&2
             exit 1
           fi
+
+      - name: Monitoring failure diagnostics (SSM)
+        if: ${{ failure() && steps.monitoring_validate.conclusion == 'failure' && steps.detect.outputs.aws == 'true' && steps.tf-out.outputs.instance_id != '' }}
+        run: |
+          iid=${{ steps.tf-out.outputs.instance_id }}
+          echo "Collecting monitoring diagnostics via SSM for $iid"
+          CMD_ID=$(aws ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript --parameters commands='echo "===== monitoring namespace pods ====="; k3s kubectl get pods -n monitoring -o wide || true; echo "===== monitoring services ====="; k3s kubectl get svc -n monitoring || true; echo "===== describe grafana svc ====="; k3s kubectl describe svc kube-prometheus-stack-grafana -n monitoring || true; echo "===== describe prometheus svc ====="; k3s kubectl describe svc kube-prometheus-stack-prometheus -n monitoring || true; echo "===== recent monitoring events (tail) ====="; k3s kubectl get events -n monitoring --sort-by=.lastTimestamp | tail -n 40 || true; echo "===== monitoring expose log (tail 120) ====="; tail -n 120 /var/log/k3s_monitoring_expose.log || true;' --query 'Command.CommandId' --output text || true)
+          sleep 8
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$iid" --query 'StandardOutputContent' --output text > monitoring-ssm-diagnostics.txt 2>/dev/null || echo "(no monitoring diagnostics)" > monitoring-ssm-diagnostics.txt
+          echo "Monitoring diagnostics captured (size $(wc -c < monitoring-ssm-diagnostics.txt 2>/dev/null || echo 0) bytes)"
 
       - name: SSM in-cluster curl diagnostics (on validation failure)
         if: ${{ failure() && steps.detect.outputs.aws == 'true' && steps.apply_ok.outputs.apply_ok == 'true' && steps.active_validate.outputs.validation_result != 'success' }}
@@ -412,6 +428,7 @@ jobs:
             validation-ssm-curl.txt
             pre-validation-snapshot.txt
             monitoring-expose.log
+            monitoring-ssm-diagnostics.txt
           if-no-files-found: warn
 
       - name: Terraform Apply Log Snippet
