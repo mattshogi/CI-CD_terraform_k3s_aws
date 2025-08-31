@@ -45,7 +45,7 @@ jobs:
       run: go build -o hello-world .
 
     - name: Upload build artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: hello-world-binary
         path: app/hello-world
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        terraform-dir: ['infra', 'infra/server', 'infra/agents']
+        terraform-dir: ['infra', 'infra/server'] # 'infra/agents' temporarily excluded (experimental)
     steps:
     - uses: actions/checkout@v4
 

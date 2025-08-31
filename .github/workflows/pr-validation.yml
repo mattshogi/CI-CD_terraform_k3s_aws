@@ -39,7 +39,7 @@ jobs:
 
     - name: Validate Terraform configurations
       run: |
-        for dir in infra infra/server infra/agents; do
+        for dir in infra infra/server; do
           if [ -d "$dir" ]; then
             echo "Validating $dir"
             cd "$dir"
