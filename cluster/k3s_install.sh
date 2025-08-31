@@ -14,6 +14,8 @@ echo "[INFO] Environment variables: NODE_INDEX=${NODE_INDEX:-}, SERVER_IP=${SERV
 # Optional feature flags (export in user-data before invoking if desired)
 ENABLE_INGRESS_NGINX=${ENABLE_INGRESS_NGINX:-false}
 ENABLE_MONITORING=${ENABLE_MONITORING:-false}
+APP_IMAGE=${APP_IMAGE:-hashicorp/http-echo:0.2.3}
+HELLO_NODE_PORT=${HELLO_NODE_PORT:-30080}
 
 # Idempotency guard
 if [ -f /tmp/k3s-install-complete ]; then
@@ -192,12 +194,48 @@ install_monitoring() {
   echo "[INFO] Monitoring stack installed successfully"
 }
 
+expose_monitoring() {
+  if [ "${NODE_INDEX:-0}" != "0" ]; then
+    return 0
+  fi
+  if [ "${ENABLE_MONITORING}" != "true" ]; then
+    return 0
+  fi
+  echo "[INFO] Exposing monitoring services via NodePort..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  # Wait a bit for services to appear
+  local waited=0
+  while [ $waited -lt 120 ]; do
+    if k3s kubectl get svc -n monitoring kube-prometheus-stack-grafana >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5; waited=$((waited+5))
+  done
+  # Patch Grafana
+  if k3s kubectl get svc -n monitoring kube-prometheus-stack-grafana >/dev/null 2>&1; then
+    k3s kubectl patch svc kube-prometheus-stack-grafana -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"name":"service","port":80,"targetPort":3000,"protocol":"TCP","nodePort":30030}]}}' || true
+  else
+    echo "[WARN] Grafana service not found for patching"
+  fi
+  # Patch Prometheus (main service selection may vary; choose server service)
+  if k3s kubectl get svc -n monitoring kube-prometheus-stack-prometheus >/dev/null 2>&1; then
+    k3s kubectl patch svc kube-prometheus-stack-prometheus -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":9090,"targetPort":9090,"protocol":"TCP","nodePort":30900}]}}' || true
+  else
+    echo "[WARN] Prometheus service not found for patching"
+  fi
+  local ip
+  ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+  echo "[INFO] Monitoring endpoints (once ready):"
+  echo "  - Grafana:    http://${ip}:30030/ (admin/admin)"
+  echo "  - Prometheus: http://${ip}:30900/"
+}
+
 deploy_hello_world() {
   if [ "${NODE_INDEX:-0}" != "0" ]; then
     echo "[INFO] Skipping application deployment on agent node"
     return 0
   fi
-  echo "[INFO] Deploying Hello World application (traefik ingress)..."
+  echo "[INFO] Deploying Hello World application with image ${APP_IMAGE} (traefik or nginx ingress)..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
   k3s kubectl create namespace hello-world || true
   cat <<EOF | k3s kubectl apply -f -
@@ -220,9 +258,9 @@ spec:
     spec:
       containers:
       - name: hello
-        image: hashicorp/http-echo:0.2.3
+        image: ${APP_IMAGE}
         args:
-        - "-text=Hello, World from k3s DevOps Showcase!"
+        - "-text=Hello, World!"
         ports:
         - containerPort: 5678
         resources:
@@ -247,7 +285,7 @@ spec:
   - port: 80
     targetPort: 5678
     protocol: TCP
-    nodePort: 30080
+    nodePort: ${HELLO_NODE_PORT}
   type: NodePort
 ---
 apiVersion: networking.k8s.io/v1
@@ -269,6 +307,66 @@ spec:
               number: 80
 EOF
   echo "[INFO] Hello World application deployed"
+
+  echo "[INFO] Waiting for Hello World pods to become Ready..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  local waited=0
+  local timeout=300
+  local fallback_performed=false
+  while [ $waited -lt $timeout ]; do
+    not_ready=$(k3s kubectl get pods -n hello-world --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1] != a[2]) print $0}' | wc -l || echo 1)
+    status_lines=$(k3s kubectl get pods -n hello-world --no-headers 2>/dev/null || true)
+    if [ -n "$status_lines" ]; then
+      echo "[DEBUG] hello-world pod status:\n$status_lines"
+    fi
+    # Detect ImagePullBackOff
+    if echo "$status_lines" | grep -q 'ImagePullBackOff'; then
+      if [ "$APP_IMAGE" != "hashicorp/http-echo:0.2.3" ] && [ "$fallback_performed" = false ]; then
+        echo "[WARN] ImagePullBackOff detected for custom image $APP_IMAGE. Falling back to hashicorp/http-echo:0.2.3"
+        cat <<FALLBACK | k3s kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-world
+  namespace: hello-world
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-world
+  template:
+    metadata:
+      labels:
+        app: hello-world
+    spec:
+      containers:
+      - name: hello
+        image: hashicorp/http-echo:0.2.3
+        args:
+        - "-text=Hello, World fallback image!"
+        ports:
+        - containerPort: 5678
+FALLBACK
+        fallback_performed=true
+        echo "[INFO] Applied fallback deployment; continuing to wait."
+      fi
+    fi
+    if [ "$not_ready" -eq 0 ] && [ -n "$status_lines" ]; then
+      echo "[INFO] Hello World pods Ready"
+      break
+    fi
+    sleep 5
+    waited=$((waited+5))
+  done
+  if [ $waited -ge $timeout ]; then
+    echo "[WARN] Timeout waiting for Hello World pods to become Ready (continuing)." >&2
+  fi
+
+  echo "[INFO] Service endpoints (once Ready):"
+  local node_ip
+  node_ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+  echo "  - Ingress (traefik): http://${node_ip}/"
+  echo "  - NodePort:          http://${node_ip}:${HELLO_NODE_PORT}/"
 }
 
 finalize_installation() {
@@ -290,7 +388,7 @@ finalize_installation() {
 }
 
 main() {
-  echo "[INFO] Starting DevOps Showcase k3s installation"
+  echo "[INFO] Starting k3s installation"
   echo "[INFO] Node Type: $([ "${NODE_INDEX:-0}" = "0" ] && echo "Server" || echo "Agent")"
   systemctl disable --now ufw 2>/dev/null || true
   wait_for_system
@@ -302,6 +400,7 @@ main() {
     setup_helm_repos
     install_ingress
     install_monitoring
+  expose_monitoring
     deploy_hello_world
   fi
   finalize_installation

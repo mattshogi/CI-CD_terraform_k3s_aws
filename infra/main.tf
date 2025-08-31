@@ -32,6 +32,42 @@ variable "k3s_server_token" {
   default     = ""
 }
 
+variable "enable_monitoring" {
+  description = "Install Prometheus + Grafana stack (kube-prometheus-stack)"
+  type        = bool
+  default     = false
+}
+
+variable "enable_ingress_nginx" {
+  description = "Install nginx ingress controller instead of bundled traefik"
+  type        = bool
+  default     = false
+}
+
+variable "app_image" {
+  description = "Container image (repository:tag) for Hello World deployment"
+  type        = string
+  default     = "hashicorp/http-echo:0.2.3"
+}
+
+variable "hello_node_port" {
+  description = "NodePort to expose Hello World service"
+  type        = number
+  default     = 30080
+}
+
+variable "enable_ssm" {
+  description = "Attach an IAM role with SSM Core permissions so the instance can be accessed via AWS Systems Manager Session Manager (recommended when no SSH key is provided)."
+  type        = bool
+  default     = true
+}
+
+variable "install_script_url" {
+  description = "URL to fetch k3s_install.sh (keeps user_data small to avoid 16KB limit)."
+  type        = string
+  default     = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
+}
+
 locals {
   sg_name = var.vpc_id != "" ? "ec2_sg-${substr(var.vpc_id, -4, 4)}" : "ec2_sg"
 }
@@ -157,11 +193,16 @@ resource "aws_instance" "k3s_server" {
   subnet_id                   = var.vpc_id != "" ? data.aws_subnet.existing[0].id : aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   associate_public_ip_address = true
+  iam_instance_profile        = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : null
   user_data = templatefile("${path.module}/../cluster/user_data.tpl", {
-    NODE_INDEX       = 0
-    SERVER_IP        = ""
-    K3S_TOKEN        = ""
-    installer_script = file("${path.module}/../cluster/k3s_install.sh")
+    NODE_INDEX           = 0
+    SERVER_IP            = ""
+    K3S_TOKEN            = ""
+    ENABLE_MONITORING    = var.enable_monitoring ? "true" : "false"
+    ENABLE_INGRESS_NGINX = var.enable_ingress_nginx ? "true" : "false"
+    APP_IMAGE            = var.app_image
+    HELLO_NODE_PORT      = tostring(var.hello_node_port)
+  INSTALL_SCRIPT_URL   = var.install_script_url
   })
   key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
   tags = {
@@ -170,6 +211,37 @@ resource "aws_instance" "k3s_server" {
     NodeCount    = tostring(var.k3s_node_count)
     TokenDefined = var.k3s_server_token != "" ? "true" : "false"
   }
+}
+
+#
+# Optional: SSM access (Session Manager) so you can connect without SSH keys
+#
+resource "aws_iam_role" "k3s_ssm_role" {
+  count = var.enable_ssm ? 1 : 0
+  name  = "k3s-ssm-role-${var.environment}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "ec2.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+  tags = { Environment = var.environment }
+}
+
+resource "aws_iam_role_policy_attachment" "k3s_ssm_core" {
+  count      = var.enable_ssm ? 1 : 0
+  role       = aws_iam_role.k3s_ssm_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "k3s_ssm_profile" {
+  count = var.enable_ssm ? 1 : 0
+  name  = "k3s-ssm-profile-${var.environment}"
+  role  = aws_iam_role.k3s_ssm_role[0].name
 }
 
 // If reusing an existing VPC, lookup its subnets (pick the first) so we can place the instance

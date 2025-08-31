@@ -52,7 +52,7 @@ resource "aws_instance" "k3s_agent" {
   })
   key_name = var.ssh_key_name
   tags = {
-    Name = "k3s-agent-${count.index + 1}"
+    Name   = "k3s-agent-${count.index + 1}"
     Module = "agents-experimental"
   }
 }

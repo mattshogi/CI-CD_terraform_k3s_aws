@@ -1,10 +1,10 @@
 #!/bin/bash
-# Integration test script for DevOps showcase project (CI safe)
+# Integration test script for project (CI safe)
 
 set -euo pipefail
 echo "[DEBUG] Starting integration test script"
 
-echo "🧪 Running DevOps Showcase Integration Tests"
+echo "🧪 Running Integration Tests"
 echo "============================================"
 
 # Test 1: Terraform Configuration
@@ -65,7 +65,7 @@ cd ..
 docker rmi devops-showcase-test >/dev/null 2>&1 || true
 
 echo ""
-echo "🎉 All tests passed! The DevOps showcase is ready for deployment."
+echo "🎉 All tests passed! The application is ready for deployment."
 echo ""
 echo "Next steps:"
 echo "1. Copy terraform.tfvars.example to terraform.tfvars"

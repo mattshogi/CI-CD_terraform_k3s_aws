@@ -7,3 +7,5 @@ terraform {
     }
   }
 }
+
+# Provider configuration (region) remains in main.tf to avoid duplication.
