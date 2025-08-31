@@ -229,6 +229,7 @@ resource "aws_instance" "k3s_server" {
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   associate_public_ip_address = true
   iam_instance_profile        = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : null
+  depends_on                  = [aws_iam_instance_profile.k3s_ssm_profile]
   user_data = templatefile("${path.module}/../cluster/user_data.tpl", {
     NODE_INDEX           = 0
     SERVER_IP            = ""
@@ -278,6 +279,13 @@ resource "aws_iam_instance_profile" "k3s_ssm_profile" {
   count = var.enable_ssm ? 1 : 0
   name  = local.iam_profile_name
   role  = aws_iam_role.k3s_ssm_role[0].name
+}
+
+# Delay to allow IAM role & instance profile propagation before launching instance (mitigates NoSuchEntity / InvalidIAMInstanceProfile race)
+resource "time_sleep" "iam_propagation_delay" {
+  count           = var.enable_ssm ? 1 : 0
+  create_duration = "15s"
+  depends_on      = [aws_iam_instance_profile.k3s_ssm_profile]
 }
 
 // If reusing an existing VPC, lookup its subnets (pick the first) so we can place the instance
