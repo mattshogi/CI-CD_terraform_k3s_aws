@@ -247,33 +247,68 @@ expose_monitoring() {
   if [ "${ENABLE_MONITORING}" != "true" ]; then
     return 0
   fi
-  echo "[INFO] Exposing monitoring services via NodePort..."
+  echo "[INFO] Exposing monitoring services via NodePort (robust mode)..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-  # Wait a bit for services to appear
-  local waited=0
-  while [ $waited -lt 120 ]; do
-    if k3s kubectl get svc -n monitoring kube-prometheus-stack-grafana >/dev/null 2>&1; then
+  local grafana_svc="kube-prometheus-stack-grafana"
+  local prom_svc="kube-prometheus-stack-prometheus"
+  local grafana_node_port=30030
+  local prom_node_port=30900
+  local timeout=600
+  local interval=5
+  local start_ts=$SECONDS
+  local log_file=/var/log/k3s_monitoring_expose.log
+  echo "[INFO] Waiting (up to ${timeout}s) for monitoring services to appear" | tee -a "$log_file"
+  while [ $((SECONDS-start_ts)) -lt $timeout ]; do
+    local have_graf have_prom
+    k3s kubectl get svc -n monitoring "$grafana_svc" >/dev/null 2>&1 && have_graf=1 || have_graf=0
+    k3s kubectl get svc -n monitoring "$prom_svc"    >/dev/null 2>&1 && have_prom=1 || have_prom=0
+    echo "[DEBUG] monitoring svc presence: grafana=$have_graf prom=$have_prom waited=$((SECONDS-start_ts))s" | tee -a "$log_file"
+    if [ $have_graf -eq 1 ] && [ $have_prom -eq 1 ]; then
       break
     fi
-    sleep 5; waited=$((waited+5))
+    sleep "$interval"
   done
-  # Patch Grafana
-  if k3s kubectl get svc -n monitoring kube-prometheus-stack-grafana >/dev/null 2>&1; then
-    k3s kubectl patch svc kube-prometheus-stack-grafana -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"name":"service","port":80,"targetPort":3000,"protocol":"TCP","nodePort":30030}]}}' || true
-  else
-    echo "[WARN] Grafana service not found for patching"
+  if ! k3s kubectl get svc -n monitoring "$grafana_svc" >/dev/null 2>&1; then
+    echo "[WARN] Grafana service not found after wait window" | tee -a "$log_file"
   fi
-  # Patch Prometheus (main service selection may vary; choose server service)
-  if k3s kubectl get svc -n monitoring kube-prometheus-stack-prometheus >/dev/null 2>&1; then
-    k3s kubectl patch svc kube-prometheus-stack-prometheus -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":9090,"targetPort":9090,"protocol":"TCP","nodePort":30900}]}}' || true
-  else
-    echo "[WARN] Prometheus service not found for patching"
+  if ! k3s kubectl get svc -n monitoring "$prom_svc" >/dev/null 2>&1; then
+    echo "[WARN] Prometheus service not found after wait window" | tee -a "$log_file"
   fi
+
+  # Patch loop function
+  patch_to_nodeport() {
+    local svc=$1; shift
+    local patch_json=$1; shift
+    local target_port=$1; shift
+    local attempts=0 max_attempts=8
+    while [ $attempts -lt $max_attempts ]; do
+      if ! k3s kubectl get svc -n monitoring "$svc" >/dev/null 2>&1; then
+        attempts=$((attempts+1)); sleep 5; continue
+      fi
+      if k3s kubectl get svc -n monitoring "$svc" -o jsonpath='{.spec.type}' 2>/dev/null | grep -q NodePort; then
+        echo "[INFO] $svc already NodePort" | tee -a "$log_file"; return 0
+      fi
+      if k3s kubectl patch svc "$svc" -n monitoring -p "$patch_json" >/dev/null 2>&1; then
+        echo "[INFO] Patched $svc to NodePort (attempt $((attempts+1)))" | tee -a "$log_file"; return 0
+      fi
+      echo "[WARN] Patch attempt $((attempts+1)) for $svc failed" | tee -a "$log_file"
+      attempts=$((attempts+1)); sleep 8
+    done
+    echo "[ERROR] Failed to patch $svc to NodePort after $max_attempts attempts" | tee -a "$log_file"
+    return 1
+  }
+
+  patch_to_nodeport "$grafana_svc" '{"spec":{"type":"NodePort","ports":[{"name":"service","port":80,"targetPort":3000,"protocol":"TCP","nodePort":30030}]}}' 3000 || true
+  patch_to_nodeport "$prom_svc" '{"spec":{"type":"NodePort","ports":[{"name":"http","port":9090,"targetPort":9090,"protocol":"TCP","nodePort":30900}]}}' 9090 || true
+
+  # Capture final service specs
+  { echo "===== FINAL monitoring services ====="; k3s kubectl get svc -n monitoring || true; echo "===== Grafana YAML ====="; k3s kubectl get svc "$grafana_svc" -n monitoring -o yaml || true; echo "===== Prometheus YAML ====="; k3s kubectl get svc "$prom_svc" -n monitoring -o yaml || true; } >> "$log_file" 2>&1 || true
+
   local ip
   ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
-  echo "[INFO] Monitoring endpoints (once ready):"
-  echo "  - Grafana:    http://${ip}:30030/ (admin/admin)"
-  echo "  - Prometheus: http://${ip}:30900/"
+  echo "[INFO] Monitoring endpoints (once pods Ready):" | tee -a "$log_file"
+  echo "  - Grafana:    http://${ip}:${grafana_node_port}/ (admin/admin)" | tee -a "$log_file"
+  echo "  - Prometheus: http://${ip}:${prom_node_port}/" | tee -a "$log_file"
 }
 
 deploy_hello_world() {
