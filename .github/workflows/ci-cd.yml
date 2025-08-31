@@ -337,21 +337,20 @@ jobs:
         run: terraform init -backend=false -input=false
 
       - name: Terraform Plan (Dry Run - With AWS Credentials)
-        if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
         working-directory: infra
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
         run: |
-          terraform plan \
-            -var="ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME || '' }}" \
-            -var="instance_type=t3.micro" \
-            -var="environment=staging"
+          export AWS_DEFAULT_REGION=us-east-1
+          if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "Running staging plan with provided AWS credentials"
+            terraform plan \
+              -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
+              -var="instance_type=t3.micro" \
+              -var="environment=staging"
+          else
+            echo "Skipping staging plan (AWS credentials not set)."
+          fi
 
-      - name: Skip Plan (No AWS Credentials)
-        if: secrets.AWS_ACCESS_KEY_ID == '' || secrets.AWS_SECRET_ACCESS_KEY == ''
-        run: echo "Skipping staging terraform plan (no AWS credentials provided)."
+  # Skip step removed; handled inline above.
 
       - name: Staging deployment completed
         run: |
@@ -377,21 +376,20 @@ jobs:
         run: terraform init -backend=false -input=false
 
       - name: Terraform Plan (Dry Run - With AWS Credentials)
-        if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
         working-directory: infra
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
         run: |
-          terraform plan \
-            -var="ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME || '' }}" \
-            -var="instance_type=t3.small" \
-            -var="environment=production"
+          export AWS_DEFAULT_REGION=us-east-1
+          if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "Running production plan with provided AWS credentials"
+            terraform plan \
+              -var="ssh_key_name=${AWS_SSH_KEY_NAME:-}" \
+              -var="instance_type=t3.small" \
+              -var="environment=production"
+          else
+            echo "Skipping production plan (AWS credentials not set)."
+          fi
 
-      - name: Skip Plan (No AWS Credentials)
-        if: secrets.AWS_ACCESS_KEY_ID == '' || secrets.AWS_SECRET_ACCESS_KEY == ''
-        run: echo "Skipping production terraform plan (no AWS credentials provided)."
+  # Skip step removed; handled inline above.
 
       - name: Production deployment completed
         run: |
