@@ -344,7 +344,7 @@ jobs:
           fi
 
       - name: Terraform Destroy (ephemeral cleanup)
-  if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply-final.outputs.final == 'success' && steps.active-validate.outputs.validation_result == 'success')) }}
+        if: ${{ always() && github.event.inputs.keep_resources != 'true' && (github.event.inputs.keep_on_failure != 'true' || (steps.apply-final.outputs.final == 'success' && steps.active-validate.outputs.validation_result == 'success')) }}
         working-directory: infra
         run: terraform destroy -auto-approve
 
