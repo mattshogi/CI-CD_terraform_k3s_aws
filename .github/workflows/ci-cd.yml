@@ -108,7 +108,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: ~1.0
+          terraform_version: 1.9.5
 
       - name: Terraform Init (no backend)
         working-directory: ${{ matrix.terraform-dir }}
@@ -225,7 +225,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: ~1.0
+          terraform_version: 1.9.5
 
       - name: Terraform Format Check
         working-directory: infra
@@ -257,7 +257,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: ~1.0
+          terraform_version: 1.9.5
 
       - name: Production deployment validation
         working-directory: infra
