@@ -1,6 +1,6 @@
 # CI/CD Terraform k3s AWS
 
-[![Deploy Status](https://github.com/mshogi/CI-CD_terraform_k3s_aws/actions/workflows/deploy.yml/badge.svg)](https://github.com/mshogi/CI-CD_terraform_k3s_aws/actions/workflows/deploy.yml)
+[![CI/CD Status](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci-cd.yml/badge.svg?branch=main)](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci-cd.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terraform](https://img.shields.io/badge/Terraform-1.8%2B-blue.svg)](https://www.terraform.io/)
 
@@ -18,7 +18,7 @@ Lightweight DevOps deployment demonstrating modern infrastructure practices with
 
 ## Architecture
 
-```
+```text
 AWS VPC
 └── Public Subnet
     └── EC2 Instance (k3s)
@@ -69,7 +69,7 @@ Then manually trigger the "Deploy k3s Cluster" workflow.
 
 ## Project Structure
 
-```
+```text
 ├── infra/                  # Terraform infrastructure code
 │   ├── main.tf            # Main infrastructure resources
 │   └── outputs.tf         # Infrastructure outputs
@@ -153,6 +153,7 @@ Run the full test suite to validate all components:
 ```
 
 This tests:
+
 - Terraform configuration validity
 - Docker build process
 - Application functionality
