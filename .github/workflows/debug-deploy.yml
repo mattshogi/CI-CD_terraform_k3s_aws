@@ -6,7 +6,7 @@ on:
       instance_type:
         description: EC2 instance type
         required: false
-        default: t3.micro
+        default: t3.small
 
 concurrency:
   group: debug-deploy
