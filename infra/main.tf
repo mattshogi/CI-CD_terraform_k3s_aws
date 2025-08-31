@@ -229,7 +229,8 @@ resource "aws_instance" "k3s_server" {
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   associate_public_ip_address = true
   iam_instance_profile        = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : null
-  depends_on                  = [aws_iam_instance_profile.k3s_ssm_profile]
+  # Ensure IAM role & instance profile have propagated (time_sleep resource) before launching instance
+  depends_on = [time_sleep.iam_propagation_delay]
   user_data = templatefile("${path.module}/../cluster/user_data.tpl", {
     NODE_INDEX           = 0
     SERVER_IP            = ""
@@ -284,7 +285,7 @@ resource "aws_iam_instance_profile" "k3s_ssm_profile" {
 # Delay to allow IAM role & instance profile propagation before launching instance (mitigates NoSuchEntity / InvalidIAMInstanceProfile race)
 resource "time_sleep" "iam_propagation_delay" {
   count           = var.enable_ssm ? 1 : 0
-  create_duration = "15s"
+  create_duration = "25s"
   depends_on      = [aws_iam_instance_profile.k3s_ssm_profile]
 }
 
