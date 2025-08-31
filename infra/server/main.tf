@@ -144,14 +144,14 @@ resource "aws_instance" "k3s_server2" {
   associate_public_ip_address = true
   # Use the same templated user_data approach as the primary module
   user_data = templatefile("${path.module}/../../cluster/user_data.tpl", {
-    NODE_INDEX       = 0
-    SERVER_IP        = ""
-    K3S_TOKEN        = ""
-  ENABLE_MONITORING    = "true"
-  ENABLE_INGRESS_NGINX = "false"
-  APP_IMAGE            = "hashicorp/http-echo:0.2.3"
-  HELLO_NODE_PORT      = "30080"
-  INSTALL_SCRIPT_URL   = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
+    NODE_INDEX           = 0
+    SERVER_IP            = ""
+    K3S_TOKEN            = ""
+    ENABLE_MONITORING    = "true"
+    ENABLE_INGRESS_NGINX = "false"
+    APP_IMAGE            = "hashicorp/http-echo:0.2.3"
+    HELLO_NODE_PORT      = "30080"
+    INSTALL_SCRIPT_URL   = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
   })
   key_name = var.ssh_key_name
   tags = {

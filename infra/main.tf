@@ -202,7 +202,7 @@ resource "aws_instance" "k3s_server" {
     ENABLE_INGRESS_NGINX = var.enable_ingress_nginx ? "true" : "false"
     APP_IMAGE            = var.app_image
     HELLO_NODE_PORT      = tostring(var.hello_node_port)
-  INSTALL_SCRIPT_URL   = var.install_script_url
+    INSTALL_SCRIPT_URL   = var.install_script_url
   })
   key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
   tags = {
