@@ -142,7 +142,13 @@ resource "aws_instance" "k3s_server2" {
   subnet_id     = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
   associate_public_ip_address = true
-  user_data = file("${path.module}/../../user_data.sh")
+  # Use the same templated user_data approach as the primary module
+  user_data = templatefile("${path.module}/../../cluster/user_data.tpl", {
+    NODE_INDEX       = 0
+    SERVER_IP        = ""
+    K3S_TOKEN        = ""
+    installer_script = file("${path.module}/../../cluster/k3s_install.sh")
+  })
   key_name = var.ssh_key_name
   tags = {
   Name        = "k3s-server-${var.environment}"
