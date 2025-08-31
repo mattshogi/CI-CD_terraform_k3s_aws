@@ -3,8 +3,9 @@ provider "aws" {
 }
 
 variable "ssh_key_name" {
-  description = "Name of the AWS EC2 SSH key pair to use. Must exist in your AWS account."
+  description = "(Optional) Name of an existing AWS EC2 SSH key pair. Leave blank to create the instance without SSH access (used for ephemeral CI tests)."
   type        = string
+  default     = ""
 }
 
 variable "instance_type" {
@@ -29,6 +30,10 @@ variable "k3s_server_token" {
   description = "k3s server node token for agent join (set after step 1)"
   type        = string
   default     = ""
+}
+
+locals {
+  sg_name = var.vpc_id != "" ? "ec2_sg-${substr(var.vpc_id, -4, 4)}" : "ec2_sg"
 }
 
 variable "vpc_id" {
@@ -75,7 +80,7 @@ resource "aws_route_table_association" "public" {
 }
 
 resource "aws_security_group" "ec2_sg" {
-  name        = "ec2_sg"
+  name        = local.sg_name
   description = "Allow SSH, HTTP, k3s, nginx Ingress"
   vpc_id      = var.vpc_id != "" ? var.vpc_id : aws_vpc.main[0].id
 
@@ -115,6 +120,12 @@ resource "aws_security_group" "ec2_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  tags = {
+    Name         = local.sg_name
+    Environment  = var.environment
+    NodeCount    = tostring(var.k3s_node_count)
+    TokenDefined = var.k3s_server_token != "" ? "true" : "false"
+  }
 }
 
 resource "aws_network_acl" "public" {
@@ -152,9 +163,12 @@ resource "aws_instance" "k3s_server" {
     K3S_TOKEN        = ""
     installer_script = file("${path.module}/../cluster/k3s_install.sh")
   })
-  key_name = var.ssh_key_name
+  key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
   tags = {
-    Name = "k3s-server"
+    Name         = "k3s-server"
+    Environment  = var.environment
+    NodeCount    = tostring(var.k3s_node_count)
+    TokenDefined = var.k3s_server_token != "" ? "true" : "false"
   }
 }
 
