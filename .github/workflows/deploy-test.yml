@@ -108,7 +108,7 @@ jobs:
             -var="enable_monitoring=${{ github.event.inputs.enable_monitoring == 'true' }}" \
             -var="install_docker=${{ github.event.inputs.install_docker == 'true' }}" \
             -var="resource_name_suffix=${{ github.run_id }}" \
-            -var="vpc_id=" \
+            -var="vpc_id=vpc-0320fffd66ed1f568" \
             -out=tfplan
             
           echo "=== PLAN VALIDATION ==="
