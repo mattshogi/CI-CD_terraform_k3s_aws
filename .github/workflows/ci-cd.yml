@@ -183,7 +183,13 @@ jobs:
 
       - name: Terraform Validate
         working-directory: ${{ matrix.terraform-dir }}
-        run: terraform validate -no-color | tee terraform-validate.out
+        id: tf-validate
+        run: |
+          set -euo pipefail
+          echo "Running terraform validate (human readable)"
+          terraform validate -no-color | tee terraform-validate.out || echo "VALIDATE_FAILED=1" >> $GITHUB_OUTPUT
+          echo "Capturing JSON validation output (non-fatal)"
+          terraform validate -json > terraform-validate.json || true
 
       - name: Debug (server module context)
         if: matrix.terraform-dir == 'infra/server'
@@ -204,9 +210,17 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: terraform-validate-${{ matrix.terraform-dir == 'infra/server' && 'infra-server' || 'infra' }}-${{ github.run_attempt }}
-          path: ${{ matrix.terraform-dir }}/terraform-validate.out
+          path: |
+            ${{ matrix.terraform-dir }}/terraform-validate.out
+            ${{ matrix.terraform-dir }}/terraform-validate.json
           if-no-files-found: ignore
           overwrite: true
+
+      - name: Fail on validation errors
+        if: steps.tf-validate.outputs.VALIDATE_FAILED == '1'
+        run: |
+          echo "Terraform validation failed in directory ${{ matrix.terraform-dir }}" >&2
+          exit 1
 
   # Validate Helm charts
   helm-validate:
