@@ -26,48 +26,26 @@ fi
 
 wait_for_system() {
   echo "[INFO] Performing system readiness checks..."
-  local max_boot_wait=120
+  local max_boot_wait=90
   local waited=0
   while [ ! -f /var/lib/cloud/instance/boot-finished ] && [ $waited -lt $max_boot_wait ]; do
-    echo "[INFO] Waiting for cloud-init final stage (boot-finished not present yet)... ($waited/${max_boot_wait}s)"
-    sleep 5
-    waited=$((waited+5))
+    echo "[INFO] Waiting cloud-init (boot-finished missing)... ($waited/${max_boot_wait}s)"
+    sleep 5; waited=$((waited+5))
   done
   if [ ! -f /var/lib/cloud/instance/boot-finished ]; then
-    echo "[WARN] boot-finished marker still absent after ${max_boot_wait}s; continuing anyway."
+    echo "[WARN] Proceeding without boot-finished; continuing"
   else
-    echo "[INFO] boot-finished detected."
+    echo "[INFO] boot-finished detected"
   fi
-
-  # Wait for package locks with timeout
-  local max_wait=300
-  local wait_time=0
-  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-    if [ $wait_time -ge $max_wait ]; then
-      echo "[ERROR] Timeout waiting for package locks"
-      exit 1
-    fi
-    echo "[INFO] Waiting for package locks... ($wait_time/${max_wait}s)"
-    sleep 10
-    wait_time=$((wait_time + 10))
-  done
+  # Defer heavy package installs until after k3s so we don't block service startup
 }
 
 # Install system dependencies (keep minimal for small instances)
 install_system_deps() {
-  echo "[INFO] Installing system dependencies..."
+  echo "[INFO] Installing minimal deps pre-k3s (curl jq)"
   apt-get update -y
-  apt-get install -y \
-    curl \
-    wget \
-    unzip \
-    git \
-    apt-transport-https \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    jq
-  echo "[INFO] System dependencies installed"
+  apt-get install -y curl jq
+  echo "[INFO] Minimal deps installed"
 }
 
 setup_swap() {
@@ -115,7 +93,7 @@ install_helm() {
 }
 
 install_k3s() {
-  echo "[INFO] Installing k3s..."
+  echo "[INFO] Installing k3s (early)";
   if [ "${NODE_INDEX:-0}" = "0" ]; then
     echo "[INFO] Installing k3s server..."
     local extra_exec="--write-kubeconfig-mode=644"
@@ -503,6 +481,7 @@ finalize_installation() {
   else
     echo "[SUCCESS] k3s agent installation completed!"
   fi
+  echo "[INFO] Creating /tmp/k3s-ready marker"; touch /tmp/k3s-ready || true
 }
 
 main() {
