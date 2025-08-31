@@ -128,6 +128,29 @@ install_k3s() {
   fi
 }
 
+wait_for_core_components() {
+  echo "[INFO] Waiting for core Kubernetes components (node Ready, coredns, traefik svc)..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  local timeout=300
+  local waited=0
+  while [ $waited -lt $timeout ]; do
+    local node_ready coredns_ready traefik_svc
+    node_ready=$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 ~ /Ready/' | wc -l || echo 0)
+    coredns_ready=$(k3s kubectl get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null | awk '$2 ~ /1\/1/' | wc -l || echo 0)
+    traefik_svc=$(k3s kubectl get svc -n kube-system traefik -o name 2>/dev/null || true)
+    if [ "$node_ready" -ge 1 ] && [ "$coredns_ready" -ge 1 ] && { [ "${ENABLE_INGRESS_NGINX}" = "true" ] || [ -n "$traefik_svc" ]; }; then
+      echo "[INFO] Core components ready (node_ready=$node_ready coredns_ready=$coredns_ready traefik_svc=${traefik_svc:-absent})"
+      return 0
+    fi
+    if (( waited % 30 == 0 )); then
+      echo "[DEBUG] core status waited=${waited}s node_ready=$node_ready coredns_ready=$coredns_ready traefik_svc=${traefik_svc:-absent}"
+      k3s kubectl get pods -n kube-system --no-headers 2>/dev/null | head -n 20 || true
+    fi
+    sleep 5; waited=$((waited+5))
+  done
+  echo "[WARN] Timed out waiting for core components; continuing"
+}
+
 wait_for_traefik() {
   if [ "${ENABLE_INGRESS_NGINX}" = "true" ]; then
     # Using nginx instead; skip traefik wait
@@ -459,12 +482,24 @@ main() {
   install_helm
   install_k3s
   if [ "${NODE_INDEX:-0}" = "0" ]; then
+  wait_for_core_components
     setup_helm_repos
     install_ingress
     install_monitoring
   wait_for_traefik
   expose_monitoring
-    deploy_hello_world
+    echo "[INFO] Deploying hello-world with retry attempts..."
+    local deploy_attempt=1
+    local deploy_max=5
+    until deploy_hello_world; do
+      if [ $deploy_attempt -ge $deploy_max ]; then
+        echo "[ERROR] deploy_hello_world failed after $deploy_attempt attempts" >&2
+        break
+      fi
+      echo "[WARN] deploy_hello_world attempt $deploy_attempt failed; retrying in 15s" >&2
+      sleep 15
+      deploy_attempt=$((deploy_attempt+1))
+    done
   fi
   finalize_installation
 }
