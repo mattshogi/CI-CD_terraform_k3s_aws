@@ -56,6 +56,12 @@ variable "hello_node_port" {
   default     = 30080
 }
 
+variable "install_docker" {
+  description = "Install Docker engine (not required for running k3s workloads; disable in low-memory ephemeral tests)"
+  type        = bool
+  default     = true
+}
+
 variable "enable_ssm" {
   description = "Attach an IAM role with SSM Core permissions so the instance can be accessed via AWS Systems Manager Session Manager (recommended when no SSH key is provided)."
   type        = bool
@@ -203,6 +209,7 @@ resource "aws_instance" "k3s_server" {
     APP_IMAGE            = var.app_image
     HELLO_NODE_PORT      = tostring(var.hello_node_port)
     INSTALL_SCRIPT_URL   = var.install_script_url
+  INSTALL_DOCKER       = var.install_docker ? "true" : "false"
   })
   key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
   tags = {

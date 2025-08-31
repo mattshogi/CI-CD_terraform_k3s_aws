@@ -11,6 +11,7 @@ ENABLE_INGRESS_NGINX="${ENABLE_INGRESS_NGINX}"
 APP_IMAGE="${APP_IMAGE}"
 HELLO_NODE_PORT="${HELLO_NODE_PORT}"
 INSTALL_SCRIPT_URL="${INSTALL_SCRIPT_URL}"
+INSTALL_DOCKER="${INSTALL_DOCKER}"
 
 mkdir -p /tmp/user-data-test
 echo "[USER-DATA-TEST] User-data script executed at $(date)" | tee /tmp/user-data-test/debug.log /var/log/cloud-init-output.log || true
@@ -30,7 +31,7 @@ fi
 chmod +x /tmp/k3s_install.sh
 
 # Export variables for the installer
-export NODE_INDEX SERVER_IP K3S_TOKEN ENABLE_MONITORING ENABLE_INGRESS_NGINX APP_IMAGE HELLO_NODE_PORT INSTALL_SCRIPT_URL
+export NODE_INDEX SERVER_IP K3S_TOKEN ENABLE_MONITORING ENABLE_INGRESS_NGINX APP_IMAGE HELLO_NODE_PORT INSTALL_SCRIPT_URL INSTALL_DOCKER
 
 # Run the installer
 /tmp/k3s_install.sh

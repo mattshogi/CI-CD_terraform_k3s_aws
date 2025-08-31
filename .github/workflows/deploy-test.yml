@@ -27,6 +27,10 @@ on:
         description: 'Install monitoring stack (true/false)'
         required: false
         default: 'false'
+      install_docker:
+        description: 'Install Docker engine (true/false)'
+        required: false
+        default: 'false'
 
 concurrency:
   group: deploy-test
@@ -97,6 +101,7 @@ jobs:
             -var="k3s_node_count=${{ github.event.inputs.k3s_node_count }}" \
             -var="environment=${{ github.event.inputs.environment || 'gha-test' }}" \
             -var="enable_monitoring=${{ github.event.inputs.enable_monitoring == 'true' }}" \
+            -var="install_docker=${{ github.event.inputs.install_docker == 'true' }}" \
             -out=tfplan
 
       - name: Terraform Apply

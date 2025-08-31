@@ -16,6 +16,7 @@ ENABLE_INGRESS_NGINX=${ENABLE_INGRESS_NGINX:-false}
 ENABLE_MONITORING=${ENABLE_MONITORING:-false}
 APP_IMAGE=${APP_IMAGE:-hashicorp/http-echo:0.2.3}
 HELLO_NODE_PORT=${HELLO_NODE_PORT:-30080}
+INSTALL_DOCKER=${INSTALL_DOCKER:-true}
 
 # Idempotency guard
 if [ -f /tmp/k3s-install-complete ]; then
@@ -69,7 +70,26 @@ install_system_deps() {
   echo "[INFO] System dependencies installed"
 }
 
+setup_swap() {
+  local swap_size_mb=512
+  if [ -f /swapfile ]; then
+    echo "[INFO] Swapfile already present"
+    return 0
+  fi
+  echo "[INFO] Creating ${swap_size_mb}MB swapfile to mitigate memory pressure..."
+  fallocate -l ${swap_size_mb}M /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=${swap_size_mb}
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo "[INFO] Swap active: $(swapon --show | tail -n +2 | awk '{print $1, $3}')"
+}
+
 install_docker() {
+  if [ "${INSTALL_DOCKER}" != "true" ]; then
+    echo "[INFO] Skipping Docker installation (INSTALL_DOCKER=${INSTALL_DOCKER})"
+    return 0
+  fi
   if command -v docker >/dev/null 2>&1; then
     echo "[INFO] Docker already installed"
     return 0
@@ -478,6 +498,7 @@ main() {
   systemctl disable --now ufw 2>/dev/null || true
   wait_for_system
   install_system_deps
+  setup_swap
   install_docker
   install_helm
   install_k3s
