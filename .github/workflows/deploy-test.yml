@@ -301,16 +301,19 @@ jobs:
           echo "Trying terraform output -json..."
           if terraform output >/dev/null 2>&1; then
             echo "Terraform has outputs available"
-            if out_json=$(terraform output -json 2>&1); then
+            # Capture JSON output and clean it
+            if out_json=$(terraform output -json 2>/dev/null); then
               echo "Got terraform output, checking if it's valid JSON..."
-              if echo "$out_json" | jq -e '.' >/dev/null 2>&1; then
+              # Clean the JSON by removing any debug output that might be mixed in
+              clean_json=$(echo "$out_json" | sed '/::debug::/d')
+              if echo "$clean_json" | jq -e '.' >/dev/null 2>&1; then
                 echo "JSON is valid, extracting values..."
-                ip=$(echo "$out_json" | jq -r '.server_public_ip.value // empty' 2>/dev/null || echo "")
-                iid=$(echo "$out_json" | jq -r '.server_instance_id.value // empty' 2>/dev/null || echo "")
+                ip=$(echo "$clean_json" | jq -r '.server_public_ip.value // empty' 2>/dev/null || echo "")
+                iid=$(echo "$clean_json" | jq -r '.server_instance_id.value // empty' 2>/dev/null || echo "")
                 echo "Extracted from JSON - IP: $ip, IID: $iid"
               else
-                echo "Output is not valid JSON. Content:"
-                echo "$out_json" | head -c 500
+                echo "Output is not valid JSON after cleaning. First 500 chars:"
+                echo "$clean_json" | head -c 500
               fi
             else
               echo "terraform output -json failed"
@@ -319,12 +322,18 @@ jobs:
             echo "terraform output command failed - no outputs defined or accessible"
           fi
           
-          # Method 2: Individual raw outputs
+          # Method 2: Individual raw outputs with cleanup
           if [ -z "$ip" ] || [ "$ip" = "null" ] || [ -z "$iid" ] || [ "$iid" = "null" ]; then
             echo "Trying individual terraform output commands..."
-            ip=$(terraform output -raw server_public_ip 2>/dev/null || echo "")
-            iid=$(terraform output -raw server_instance_id 2>/dev/null || echo "")
-            echo "Raw outputs - IP: $ip, IID: $iid"
+            # Handle setup-terraform wrapper that adds debug output
+            ip_raw=$(terraform output -raw server_public_ip 2>/dev/null || echo "")
+            iid_raw=$(terraform output -raw server_instance_id 2>/dev/null || echo "")
+            
+            # Clean up the output by extracting just the value before any ::debug:: markers
+            ip=$(echo "$ip_raw" | sed 's/::debug::.*//' | tr -d '\n\r' || echo "")
+            iid=$(echo "$iid_raw" | sed 's/::debug::.*//' | tr -d '\n\r' || echo "")
+            
+            echo "Raw outputs (cleaned) - IP: $ip, IID: $iid"
           fi
           
           # Method 3: Extract from state directly
@@ -353,7 +362,25 @@ jobs:
         run: |
           echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
           echo "Instance ID: ${{ steps.tf-out.outputs.instance_id }}"
-          if ! echo "${{ steps.tf-out.outputs.instance_id }}" | grep -q '^i-'; then echo "[WARN] Instance ID pattern invalid"; fi
+          if ! echo "${{ steps.tf-out.outputs.instance_id }}" | grep -q '^i-'; then 
+            echo "[WARN] Instance ID pattern invalid: '${{ steps.tf-out.outputs.instance_id }}'"
+            echo "This may indicate Terraform outputs were not captured correctly"
+          else
+            echo "[INFO] Instance ID looks valid"
+          fi
+          
+          # Additional validation of outputs
+          if [ "${{ steps.tf-out.outputs.server_ip }}" = "UNKNOWN" ] || [ -z "${{ steps.tf-out.outputs.server_ip }}" ]; then
+            echo "[ERROR] Server IP is UNKNOWN or empty - this will cause validation failures"
+            exit 1
+          fi
+          
+          if [ "${{ steps.tf-out.outputs.instance_id }}" = "UNKNOWN" ] || [ -z "${{ steps.tf-out.outputs.instance_id }}" ]; then
+            echo "[ERROR] Instance ID is UNKNOWN or empty - this will cause validation failures"
+            exit 1
+          fi
+          
+          echo "[SUCCESS] Both outputs captured successfully"
 
       - name: Warm-up (k3s install)
         if: ${{ steps.apply_final.outputs.final_apply_exit_code == '0' }}
@@ -408,46 +435,101 @@ jobs:
         id: validate
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
-          if [ -z "$ip" ] || [ "$ip" = "UNKNOWN" ]; then echo "Missing IP" >&2; exit 1; fi
+          if [ -z "$ip" ] || [ "$ip" = "UNKNOWN" ]; then 
+            echo "[ERROR] Missing or invalid IP address: '$ip'" >&2
+            echo "Cannot proceed with validation without valid IP"
+            exit 1
+          fi
+          
+          echo "[INFO] Starting validation with IP: $ip"
           echo "Validating ingress http://$ip/"
+          
+          # Test basic connectivity first
+          echo "Testing basic connectivity to $ip..."
+          if ! ping -c 1 -W 5 "$ip" >/dev/null 2>&1; then
+            echo "[WARN] Ping to $ip failed - instance may not be ready yet"
+          else
+            echo "[INFO] Ping to $ip successful"
+          fi
+          
           ok=false
           for i in $(seq 1 25); do
-            code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip/" || echo 000)
-            echo "Attempt $i code=$code"
-            if [ "$code" = "200" ]; then ok=true; break; fi
+            echo "Ingress validation attempt $i/25..."
+            code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip/" 2>/dev/null || echo 000)
+            echo "Attempt $i: HTTP code=$code"
+            if [ "$code" = "200" ]; then 
+              ok=true
+              echo "[SUCCESS] Ingress is responding with HTTP 200"
+              break
+            elif [ "$code" != "000" ]; then
+              echo "[INFO] Got HTTP $code - service may be starting up"
+            fi
             sleep 5
           done
+          
           if [ "$ok" != true ]; then
-            echo "Ingress unreachable; trying NodePort fallback (30080)" >&2
+            echo "[WARN] Ingress unreachable on port 80; trying NodePort fallback (30080)" >&2
             for i in $(seq 1 15); do
-              np_code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30080/" || echo 000)
-              echo "NodePort attempt $i code=$np_code"
-              if [ "$np_code" = "200" ]; then ok=true; echo "nodeport_used=true" >> $GITHUB_OUTPUT; break; fi
+              echo "NodePort validation attempt $i/15..."
+              np_code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30080/" 2>/dev/null || echo 000)
+              echo "NodePort attempt $i: HTTP code=$np_code"
+              if [ "$np_code" = "200" ]; then 
+                ok=true
+                echo "nodeport_used=true" >> $GITHUB_OUTPUT
+                echo "[SUCCESS] NodePort is responding with HTTP 200"
+                break
+              fi
               sleep 4
             done
           else
-            echo "Ingress reachable"; echo "nodeport_used=false" >> $GITHUB_OUTPUT
+            echo "Ingress reachable on port 80"
+            echo "nodeport_used=false" >> $GITHUB_OUTPUT
           fi
-          if [ "$ok" != true ]; then echo "validation_result=failure" >> $GITHUB_OUTPUT; echo "Application endpoints unreachable" >&2; exit 1; fi
-          echo "Application reachable (ok=$ok)"
+          
+          if [ "$ok" != true ]; then 
+            echo "validation_result=failure" >> $GITHUB_OUTPUT
+            echo "[ERROR] Application endpoints unreachable on both port 80 and 30080" >&2
+            echo "This suggests k3s or the application deployment failed"
+            exit 1
+          fi
+          
+          echo "[SUCCESS] Application is reachable (ok=$ok)"
+          
           if [ '${{ github.event.inputs.enable_monitoring }}' = 'true' ]; then
-            echo "Checking monitoring endpoints (Grafana 30030 root path, Prometheus 30900 root path)"
+            echo "[INFO] Checking monitoring endpoints (Grafana 30030, Prometheus 30900)"
             graf=false; prom=false
             for i in $(seq 1 30); do
-              g=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30030/" || echo 000)
-              p=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30900/" || echo 000)
-              echo "Mon Attempt $i grafana=$g prometheus=$p"
+              echo "Monitoring validation attempt $i/30..."
+              g=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30030/" 2>/dev/null || echo 000)
+              p=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30900/" 2>/dev/null || echo 000)
+              echo "Monitoring attempt $i: grafana=$g prometheus=$p"
+              
+              # Grafana typically returns 200, 302 (redirect), or 401 (auth required)
               [[ $g =~ ^(200|302|401)$ ]] && graf=true
+              # Prometheus typically returns 200 or 405 (method not allowed for GET /)
               [[ $p =~ ^(200|405)$ ]] && prom=true
-              if [ "$graf" = true ] && [ "$prom" = true ]; then break; fi
+              
+              if [ "$graf" = true ] && [ "$prom" = true ]; then 
+                echo "[SUCCESS] Both monitoring endpoints are responding"
+                break
+              fi
               sleep 6
             done
+            
             echo "grafana_ok=$graf" >> $GITHUB_OUTPUT
             echo "prometheus_ok=$prom" >> $GITHUB_OUTPUT
-            if [ "$graf" != true ] || [ "$prom" != true ]; then echo "validation_result=failure" >> $GITHUB_OUTPUT; echo "Monitoring endpoints unreachable" >&2; exit 1; fi
-            echo "Monitoring reachable"
+            
+            if [ "$graf" != true ] || [ "$prom" != true ]; then 
+              echo "validation_result=failure" >> $GITHUB_OUTPUT
+              echo "[ERROR] Monitoring endpoints unreachable - Grafana: $graf, Prometheus: $prom" >&2
+              echo "This suggests the monitoring stack failed to deploy or start properly"
+              exit 1
+            fi
+            echo "[SUCCESS] Monitoring stack is accessible"
           fi
+          
           echo "validation_result=success" >> $GITHUB_OUTPUT
+          echo "[SUCCESS] All validation checks passed!"
 
       - name: Fetch monitoring exposure log
         if: ${{ always() && github.event.inputs.enable_monitoring == 'true' && steps.apply_final.outputs.final_apply_exit_code == '0' }}
