@@ -2,10 +2,6 @@ provider "aws" {
   region = "us-east-1"
 }
 
-resource "random_pet" "ephemeral" {
-  length = 2
-}
-
 variable "ssh_key_name" {
   description = "(Optional) Name of an existing AWS EC2 SSH key pair. Leave blank to create the instance without SSH access (used for ephemeral CI tests)."
   type        = string
@@ -78,10 +74,17 @@ variable "install_script_url" {
   default     = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
 }
 
+variable "resource_name_suffix" {
+  description = "Optional suffix appended to resource names (e.g., CI run id) to avoid name collisions."
+  type        = string
+  default     = ""
+}
+
 locals {
-  sg_name          = var.vpc_id != "" ? "ec2_sg-${substr(var.vpc_id, -4, 4)}" : "ec2_sg"
-  unique_suffix    = random_pet.ephemeral.id
-  name_suffix_full = "${var.environment}-${local.unique_suffix}"
+  sg_base = var.vpc_id != "" ? "ec2_sg-${substr(var.vpc_id, -4, 4)}" : "ec2_sg"
+  sg_name = var.resource_name_suffix != "" ? "${local.sg_base}-${var.resource_name_suffix}" : local.sg_base
+  iam_role_name    = var.resource_name_suffix != "" ? "k3s-ssm-role-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-role-${var.environment}"
+  iam_profile_name = var.resource_name_suffix != "" ? "k3s-ssm-profile-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-profile-${var.environment}"
 }
 
 variable "vpc_id" {
@@ -128,7 +131,7 @@ resource "aws_route_table_association" "public" {
 }
 
 resource "aws_security_group" "ec2_sg" {
-  name_prefix = "${local.sg_name}-${local.unique_suffix}-"
+  name        = local.sg_name
   description = "Allow SSH, HTTP, k3s, nginx Ingress"
   vpc_id      = var.vpc_id != "" ? var.vpc_id : aws_vpc.main[0].id
 
@@ -169,11 +172,11 @@ resource "aws_security_group" "ec2_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   tags = {
-    Name         = "${local.sg_name}-${local.unique_suffix}"
+    Name         = local.sg_name
     Environment  = var.environment
     NodeCount    = tostring(var.k3s_node_count)
     TokenDefined = var.k3s_server_token != "" ? "true" : "false"
-    Suffix       = local.unique_suffix
+    Suffix       = var.resource_name_suffix
   }
 }
 
@@ -231,8 +234,8 @@ resource "aws_instance" "k3s_server" {
 # Optional: SSM access (Session Manager) so you can connect without SSH keys
 #
 resource "aws_iam_role" "k3s_ssm_role" {
-  count      = var.enable_ssm ? 1 : 0
-  name_prefix = "k3s-ssm-role-${var.environment}-"
+  count = var.enable_ssm ? 1 : 0
+  name  = local.iam_role_name
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -253,9 +256,9 @@ resource "aws_iam_role_policy_attachment" "k3s_ssm_core" {
 }
 
 resource "aws_iam_instance_profile" "k3s_ssm_profile" {
-  count      = var.enable_ssm ? 1 : 0
-  name_prefix = "k3s-ssm-profile-${var.environment}-"
-  role       = aws_iam_role.k3s_ssm_role[0].name
+  count = var.enable_ssm ? 1 : 0
+  name  = local.iam_profile_name
+  role  = aws_iam_role.k3s_ssm_role[0].name
 }
 
 // If reusing an existing VPC, lookup its subnets (pick the first) so we can place the instance
