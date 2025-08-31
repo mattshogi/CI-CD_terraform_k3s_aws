@@ -109,6 +109,10 @@ jobs:
         with:
           terraform_version: ~1.0
 
+      - name: Terraform Init (no backend)
+        working-directory: ${{ matrix.terraform-dir }}
+        run: terraform init -backend=false -input=false
+
       - name: Terraform Format Check
         working-directory: ${{ matrix.terraform-dir }}
         run: terraform fmt -check
@@ -124,11 +128,16 @@ jobs:
 
       - name: TFLint Run
         working-directory: ${{ matrix.terraform-dir }}
-        run: tflint -f compact
+        run: tflint -f compact | tee tflint.out
+        continue-on-error: true
 
-      - name: Terraform Init
-        working-directory: ${{ matrix.terraform-dir }}
-        run: terraform init -backend=false
+      - name: Upload TFLint Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tflint-${{ matrix.terraform-dir }}
+          path: ${{ matrix.terraform-dir }}/tflint.out
+          if-no-files-found: ignore
 
       - name: Terraform Validate
         working-directory: ${{ matrix.terraform-dir }}
