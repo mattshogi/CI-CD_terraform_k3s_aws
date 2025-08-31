@@ -19,6 +19,12 @@ variable "k3s_node_count" {
   default     = 0
 }
 
+variable "environment" {
+  description = "Environment name (staging, production, etc.)"
+  type        = string
+  default     = "dev"
+}
+
 variable "k3s_server_token" {
   description = "k3s server node token for agent join (set after step 1)"
   type        = string

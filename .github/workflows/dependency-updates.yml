@@ -1,0 +1,108 @@
+name: Dependency Updates
+
+on:
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+jobs:
+  update-go-dependencies:
+    name: Update Go Dependencies
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Update Go dependencies
+      working-directory: ./app
+      run: |
+        go get -u ./...
+        go mod tidy
+
+    - name: Create Pull Request
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: 'chore: update Go dependencies'
+        title: 'chore: update Go dependencies'
+        body: |
+          Automated update of Go dependencies.
+          
+          Please review the changes and ensure all tests pass before merging.
+        branch: update-go-dependencies
+        delete-branch: true
+
+  update-terraform-providers:
+    name: Update Terraform Providers
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ~1.0
+
+    - name: Update Terraform providers
+      run: |
+        for dir in infra infra/server infra/agents; do
+          if [ -d "$dir" ]; then
+            echo "Updating providers in $dir"
+            cd "$dir"
+            terraform init -upgrade
+            cd - > /dev/null
+          fi
+        done
+
+    - name: Create Pull Request
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: 'chore: update Terraform providers'
+        title: 'chore: update Terraform providers'
+        body: |
+          Automated update of Terraform providers.
+          
+          Please review the changes and test the infrastructure before merging.
+        branch: update-terraform-providers
+        delete-branch: true
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Run Go security audit
+      working-directory: ./app
+      run: |
+        go install golang.org/x/vuln/cmd/govulncheck@latest
+        govulncheck ./...
+
+    - name: Run Trivy filesystem scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-fs-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-fs-results.sarif'

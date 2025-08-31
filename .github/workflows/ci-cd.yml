@@ -1,0 +1,242 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/hello-world
+
+jobs:
+  # Test and build the Go application
+  test-app:
+    name: Test Go Application
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      working-directory: ./app
+      run: go mod download
+
+    - name: Run tests
+      working-directory: ./app
+      run: go test -v ./...
+
+    - name: Build application
+      working-directory: ./app
+      run: go build -o hello-world .
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: hello-world-binary
+        path: app/hello-world
+
+  # Build and test Docker image
+  build-docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test-app
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix=sha-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./app
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Validate Terraform configurations
+  terraform-validate:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform-dir: ['infra', 'infra/server', 'infra/agents']
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ~1.0
+
+    - name: Terraform Format Check
+      working-directory: ${{ matrix.terraform-dir }}
+      run: terraform fmt -check
+
+    - name: Terraform Init
+      working-directory: ${{ matrix.terraform-dir }}
+      run: terraform init -backend=false
+
+    - name: Terraform Validate
+      working-directory: ${{ matrix.terraform-dir }}
+      run: terraform validate
+
+  # Validate Helm charts
+  helm-validate:
+    name: Validate Helm Charts
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: v3.12.0
+
+    - name: Helm Lint
+      run: helm lint charts/hello-world/
+
+    - name: Helm Template
+      run: |
+        helm template hello-world charts/hello-world/ \
+          --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+          --set image.tag=latest
+
+  # Security scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-docker
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Integration tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test-app, build-docker]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Run integration tests
+      run: |
+        # Make the script executable
+        chmod +x scripts/test-integration.sh
+        
+        # Run integration tests
+        ./scripts/test-integration.sh
+
+  # Deploy to staging (on main branch)
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [terraform-validate, helm-validate, security-scan, integration-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ~1.0
+
+    - name: Terraform Format Check
+      working-directory: infra
+      run: terraform fmt -check
+
+    - name: Terraform Plan (Dry Run)
+      working-directory: infra
+      run: |
+        terraform init -backend=false
+        terraform plan \
+          -var="ssh_key_name=dummy-key" \
+          -var="instance_type=t3.micro" \
+          -var="environment=staging"
+
+    - name: Staging deployment completed
+      run: |
+        echo "✅ Staging deployment validation completed"
+        echo "🚀 Ready for production deployment"
+
+  # Deploy to production (manual trigger or tag)
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [terraform-validate, helm-validate, security-scan, integration-tests]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ~1.0
+
+    - name: Production deployment validation
+      working-directory: infra
+      run: |
+        terraform init -backend=false
+        terraform plan \
+          -var="ssh_key_name=production-key" \
+          -var="instance_type=t3.small" \
+          -var="environment=production"
+
+    - name: Production deployment completed
+      run: |
+        echo "✅ Production deployment validation completed"
+        echo "🎉 Production deployment ready!"

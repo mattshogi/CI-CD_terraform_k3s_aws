@@ -1,0 +1,116 @@
+name: Pull Request Validation
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/hello-world
+
+jobs:
+  # Quick validation for PRs
+  validate-pr:
+    name: Validate Pull Request
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Run Go tests
+      working-directory: ./app
+      run: |
+        go mod download
+        go test -v ./...
+        go build -o hello-world .
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ~1.0
+
+    - name: Validate Terraform formatting
+      run: |
+        terraform fmt -check -recursive .
+
+    - name: Validate Terraform configurations
+      run: |
+        for dir in infra infra/server infra/agents; do
+          if [ -d "$dir" ]; then
+            echo "Validating $dir"
+            cd "$dir"
+            terraform init -backend=false
+            terraform validate
+            cd - > /dev/null
+          fi
+        done
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: v3.12.0
+
+    - name: Validate Helm charts
+      run: |
+        helm lint charts/hello-world/
+
+    - name: Build Docker image (test only)
+      uses: docker/build-push-action@v5
+      with:
+        context: ./app
+        push: false
+        tags: test:latest
+
+  # Cost estimation for infrastructure changes
+  terraform-cost:
+    name: Terraform Cost Estimation
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.changed_files, 'infra/')
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ~1.0
+
+    - name: Terraform Init
+      working-directory: infra
+      run: terraform init -backend=false
+
+    - name: Terraform Plan
+      working-directory: infra
+      run: |
+        terraform plan \
+          -var="ssh_key_name=dummy-key" \
+          -var="instance_type=t3.micro" \
+          -var="environment=pr-${{ github.event.number }}" \
+          -out=tfplan
+
+    - name: Comment cost estimation
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const issue_number = context.issue.number;
+          const comment = `
+          ## 💰 Terraform Cost Estimation
+          
+          Infrastructure changes detected in this PR.
+          
+          **Estimated changes:**
+          - Instance type: t3.micro
+          - Environment: pr-${issue_number}
+          
+          Please review the infrastructure changes carefully before merging.
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: issue_number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
