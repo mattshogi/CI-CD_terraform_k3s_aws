@@ -148,7 +148,7 @@ jobs:
         run: |
           sudo apt-get update -y >/dev/null 2>&1 || true
           sudo apt-get install -y jq >/dev/null 2>&1 || true
-            out_json=$(terraform output -json || exit 1)
+          out_json=$(terraform output -json || exit 1)
           ip=$(echo "$out_json" | jq -r '.server_public_ip.value // empty')
           iid=$(echo "$out_json" | jq -r '.server_instance_id.value // empty')
           [ -z "$ip" ] && ip=UNKNOWN
