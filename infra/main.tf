@@ -26,6 +26,12 @@ variable "environment" {
   default     = "dev"
 }
 
+variable "ami_id" {
+  description = "Optional override for the EC2 AMI ID. Leave blank to auto-select the latest Ubuntu 22.04 LTS (amd64, hvm, ebs)."
+  type        = string
+  default     = ""
+}
+
 variable "k3s_server_token" {
   description = "k3s server node token for agent join (set after step 1)"
   type        = string
@@ -85,6 +91,19 @@ locals {
   sg_name          = var.resource_name_suffix != "" ? "${local.sg_base}-${var.resource_name_suffix}" : local.sg_base
   iam_role_name    = var.resource_name_suffix != "" ? "k3s-ssm-role-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-role-${var.environment}"
   iam_profile_name = var.resource_name_suffix != "" ? "k3s-ssm-profile-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-profile-${var.environment}"
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
 }
 
 variable "vpc_id" {
@@ -204,7 +223,7 @@ resource "aws_network_acl" "public" {
 }
 
 resource "aws_instance" "k3s_server" {
-  ami                         = "ami-0bbdd8c17ed981ef9"
+  ami                         = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   subnet_id                   = var.vpc_id != "" ? data.aws_subnet.existing[0].id : aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
