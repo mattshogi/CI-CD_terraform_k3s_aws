@@ -19,6 +19,14 @@ on:
         description: 'Environment tag (for resource naming)'
         required: false
         default: 'gha-test'
+      readiness_attempts:
+        description: 'Number of validation attempts (10s interval)'
+        required: false
+        default: '72'
+      enable_monitoring:
+        description: 'Install monitoring stack (true/false)'
+        required: false
+        default: 'false'
 
 concurrency:
   group: deploy-test
@@ -45,6 +53,12 @@ jobs:
           if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then echo "HAS_SSH_KEY=true" >> $GITHUB_ENV; fi
           if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "HAS_AWS_CREDS=true" >> $GITHUB_ENV; else echo "HAS_AWS_CREDS=false" >> $GITHUB_ENV; fi
 
+      - name: Fail fast if AWS credentials missing
+        if: env.HAS_AWS_CREDS != 'true'
+        run: |
+          echo "ERROR: AWS credentials not provided. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY repository or environment secrets." >&2
+          exit 1
+
       - name: Configure AWS credentials
         if: env.HAS_AWS_CREDS == 'true'
         uses: aws-actions/configure-aws-credentials@v4
@@ -52,6 +66,10 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        if: env.HAS_AWS_CREDS == 'true'
+        run: aws sts get-caller-identity
 
       - name: Prepare SSH key (optional validation via SSH)
         if: env.HAS_SSH_KEY == 'true'
@@ -78,6 +96,7 @@ jobs:
             -var="instance_type=${{ github.event.inputs.instance_type }}" \
             -var="k3s_node_count=${{ github.event.inputs.k3s_node_count }}" \
             -var="environment=${{ github.event.inputs.environment || 'gha-test' }}" \
+            -var="enable_monitoring=${{ github.event.inputs.enable_monitoring == 'true' }}" \
             -out=tfplan
 
       - name: Terraform Apply
@@ -90,23 +109,33 @@ jobs:
         run: |
           echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT || echo "server_ip=UNKNOWN" >> $GITHUB_OUTPUT
 
-      - name: Wait for k3s bootstrap
+      - name: Echo Terraform outputs
+        run: |
+          echo "Server IP: ${{ steps.tf-out.outputs.server_ip }}"
+
+      - name: Initial warm-up wait
         run: |
           ip=${{ steps.tf-out.outputs.server_ip }}
-          echo "Target IP: $ip"
-          echo "Waiting up to 12 minutes for HTTP readiness..."
-          for i in $(seq 1 72); do
-            if curl -fsS --max-time 5 "http://$ip/" | grep -qi 'Hello'; then
-              echo "Application responding."; exit 0; fi
-            sleep 10
-          done
-          echo "Timed out waiting for application endpoint" >&2
-          exit 1
+          echo "Allowing initial 60s warm-up before active validation (IP: $ip)"
+          sleep 60
+
+      - name: Active endpoint validation (Ingress + NodePort)
+        run: |
+          ip=${{ steps.tf-out.outputs.server_ip }}
+          attempts=${{ github.event.inputs.readiness_attempts }}
+          echo "Running scripts/validate_endpoints.sh $ip $attempts 10"
+          chmod +x scripts/validate_endpoints.sh || true
+          if ! scripts/validate_endpoints.sh "$ip" "$attempts" 10; then
+            echo "Endpoint validation did not succeed within given attempts" >&2
+            # Continue to diagnostics rather than fail immediately
+            exit 1
+          fi
 
       - name: Run endpoint validation script
+        if: cancelled() == false
         run: |
-          chmod +x scripts/validate_endpoints.sh || true
-          scripts/validate_endpoints.sh ${{ steps.tf-out.outputs.server_ip }} || echo "Endpoint script returned non-zero (continuing to collect diagnostics)"
+          echo "(Secondary validation skipped: replaced by Active endpoint validation step)"
+          true
 
       - name: Optional SSH diagnostics
         if: env.HAS_SSH_KEY == 'true'
@@ -116,10 +145,14 @@ jobs:
           echo "Collecting remote diagnostics from $ip"
           for cmd in \
             "sudo systemctl status k3s --no-pager" \
-            "sudo journalctl -u k3s -n 200 --no-pager" \
-            "sudo ls -l /var/log" \
-            "sudo tail -n 100 /var/log/cloud-init-output.log" \
-            "sudo k3s kubectl get pods -A"; do
+            "sudo journalctl -u k3s -n 400 --no-pager" \
+            "sudo tail -n 200 /var/log/cloud-init-output.log" \
+            "sudo k3s kubectl get nodes -o wide" \
+            "sudo k3s kubectl get pods -A -o wide" \
+            "sudo k3s kubectl get svc -A" \
+            "sudo k3s kubectl get ingress -A" \
+            "sudo k3s kubectl describe ingress -A || true" \
+            "sudo k3s kubectl describe pods -n hello-world || true"; do
               echo "===== $cmd =====";
               ssh -i ~/.ssh/id_k3s_aws ubuntu@"$ip" "$cmd" || true;
             done > diagnostics.txt
