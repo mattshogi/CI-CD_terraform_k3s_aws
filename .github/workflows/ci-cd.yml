@@ -334,12 +334,24 @@ jobs:
 
       - name: Terraform Plan (Dry Run)
         working-directory: infra
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Plan (Dry Run - With AWS Credentials)
+        if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
         run: |
-          terraform init -backend=false
           terraform plan \
-            -var="ssh_key_name=dummy-key" \
+            -var="ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME || '' }}" \
             -var="instance_type=t3.micro" \
             -var="environment=staging"
+
+      - name: Skip Plan (No AWS Credentials)
+        if: secrets.AWS_ACCESS_KEY_ID == '' || secrets.AWS_SECRET_ACCESS_KEY == ''
+        run: echo "Skipping staging terraform plan (no AWS credentials provided)."
 
       - name: Staging deployment completed
         run: |
@@ -362,12 +374,24 @@ jobs:
 
       - name: Production deployment validation
         working-directory: infra
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Plan (Dry Run - With AWS Credentials)
+        if: secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        working-directory: infra
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
         run: |
-          terraform init -backend=false
           terraform plan \
-            -var="ssh_key_name=production-key" \
+            -var="ssh_key_name=${{ secrets.AWS_SSH_KEY_NAME || '' }}" \
             -var="instance_type=t3.small" \
             -var="environment=production"
+
+      - name: Skip Plan (No AWS Credentials)
+        if: secrets.AWS_ACCESS_KEY_ID == '' || secrets.AWS_SECRET_ACCESS_KEY == ''
+        run: echo "Skipping production terraform plan (no AWS credentials provided)."
 
       - name: Production deployment completed
         run: |
