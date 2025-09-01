@@ -1,4 +1,4 @@
-# CI/CD Terraform k3s AWS
+# CI/CD - Github Actions - Terraform - k3s - Helm - Prometheus - Grafana - AWS
 
 [![CI/CD Status](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci-cd.yml/badge.svg?branch=main)](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci-cd.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
