@@ -7,17 +7,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  cleanup-old-images:
-    name: Cleanup Old Container Images
-    runs-on: ubuntu-latest
-    steps:
-    - name: Delete old container images
-      uses: actions/delete-package-versions@v4
-      with:
-        package-name: 'hello-world'
-        package-type: 'container'
-        min-versions-to-keep: 5
-        delete-only-untagged-versions: true
+  #cleanup-old-images:
+  #  name: Cleanup Old Container Images
+  #  runs-on: ubuntu-latest
+  #  steps:
+  #  - name: Delete old container images
+  #    uses: actions/delete-package-versions@v4
+  #    with:
+  #      package-name: 'hello-world'
+  #      package-type: 'container'
+  #      min-versions-to-keep: 5
+  #      delete-only-untagged-versions: true
 
   check-infrastructure:
     name: Check Infrastructure Health
