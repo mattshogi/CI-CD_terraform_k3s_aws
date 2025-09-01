@@ -456,7 +456,7 @@ jobs:
           ok=false
           for i in $(seq 1 25); do
             echo "Ingress validation attempt $i/25..."
-            code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip/" 2>/dev/null || echo 000)
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip/" 2>/dev/null || echo 000)
             echo "Attempt $i: HTTP code=$code"
             if [ "$code" = "200" ]; then 
               ok=true
@@ -472,7 +472,7 @@ jobs:
             echo "[WARN] Ingress unreachable on port 80; trying NodePort fallback (30080)" >&2
             for i in $(seq 1 15); do
               echo "NodePort validation attempt $i/15..."
-              np_code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30080/" 2>/dev/null || echo 000)
+              np_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30080/" 2>/dev/null || echo 000)
               echo "NodePort attempt $i: HTTP code=$np_code"
               if [ "$np_code" = "200" ]; then 
                 ok=true
@@ -501,8 +501,8 @@ jobs:
             graf=false; prom=false
             for i in $(seq 1 30); do
               echo "Monitoring validation attempt $i/30..."
-              g=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30030/" 2>/dev/null || echo 000)
-              p=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 "http://$ip:30900/" 2>/dev/null || echo 000)
+              g=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30030/" 2>/dev/null || echo 000)
+              p=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip:30900/" 2>/dev/null || echo 000)
               echo "Monitoring attempt $i: grafana=$g prometheus=$p"
               
               # Grafana typically returns 200, 302 (redirect), or 401 (auth required)
