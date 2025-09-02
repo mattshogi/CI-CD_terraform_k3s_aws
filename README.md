@@ -24,8 +24,8 @@ AWS VPC
     └── EC2 Instance (k3s)
         ├── nginx Ingress Controller (port 80)
         ├── Hello World App
-        ├── Prometheus (port 9090)
-        └── Grafana (port 3000)
+        ├── Prometheus (port 30900)
+        └── Grafana (port 30030)
 ```
 
 ## Quick Start
