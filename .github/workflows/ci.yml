@@ -189,7 +189,7 @@ jobs:
       # Report HIGH+ to the Security tab without failing (a public demo
       # endpoint intentionally trips some HIGH checks) …
       - name: Trivy config scan (report)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
@@ -206,7 +206,7 @@ jobs:
 
       # … but fail the build on CRITICAL misconfigurations.
       - name: Trivy config scan (gate on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
@@ -228,7 +228,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Trivy image scan (gate on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}
           format: sarif
