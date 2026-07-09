@@ -1,0 +1,7 @@
+# Copy to backend.hcl (gitignored) and adjust, or let
+# scripts/bootstrap_remote_state.sh generate it for you.
+bucket       = "tfstate-<account-id>-us-east-1"
+key          = "k3s/dev/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true
