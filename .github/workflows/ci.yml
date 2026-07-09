@@ -186,8 +186,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Report HIGH+ to the Security tab without failing (a public demo
-      # endpoint intentionally trips some HIGH checks) …
+      # Report HIGH+ to the Security tab (non-blocking; the gate step below
+      # is what fails the build) …
       - name: Trivy config scan (report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -204,14 +204,16 @@ jobs:
         with:
           sarif_file: trivy-config.sarif
 
-      # … but fail the build on CRITICAL misconfigurations.
-      - name: Trivy config scan (gate on CRITICAL)
+      # … and fail the build on HIGH or CRITICAL misconfigurations. Accepted
+      # findings carry inline trivy:ignore justifications or .trivyignore
+      # entries with rationale — the gate stays honest for everything else.
+      - name: Trivy config scan (gate on HIGH+)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
           format: table
-          severity: CRITICAL
+          severity: HIGH,CRITICAL
           exit-code: '1'
 
   image-scan:

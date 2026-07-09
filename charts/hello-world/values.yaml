@@ -1,10 +1,11 @@
 replicaCount: 1
 
 image:
-  # The image built and pushed by this repo's CI pipeline. CI overrides the
-  # tag with the immutable digest of the exact build being deployed.
+  # The image built and pushed by this repo's CI pipeline. Real deploys always
+  # override the tag with the immutable sha-<commit> tag of the build being
+  # deployed; "main" is only the fallback for ad-hoc local installs.
   repository: ghcr.io/mattshogi/ci-cd_terraform_k3s_aws/hello-world
-  tag: "latest"
+  tag: "main"
   pullPolicy: IfNotPresent
 
 # Extra container args. Empty for the Go app; the bootstrap fallback image
