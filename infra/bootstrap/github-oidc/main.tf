@@ -120,10 +120,14 @@ resource "aws_iam_role_policy" "deploy_permissions" {
       {
         Sid    = "SsmParametersAndDiagnostics"
         Effect = "Allow"
+        # Full parameter lifecycle as the AWS provider actually exercises it:
+        # create/read-back uses GetParameters (plural) and DescribeParameters
+        # in addition to the obvious singular calls.
         Action = [
-          "ssm:PutParameter", "ssm:GetParameter", "ssm:DeleteParameter",
-          "ssm:DescribeParameters", # provider reads metadata after create
+          "ssm:PutParameter", "ssm:GetParameter", "ssm:GetParameters",
+          "ssm:DeleteParameter", "ssm:DescribeParameters",
           "ssm:ListTagsForResource", "ssm:AddTagsToResource",
+          "ssm:RemoveTagsFromResource",
           "ssm:SendCommand", "ssm:GetCommandInvocation",
         ]
         Resource = "*"
