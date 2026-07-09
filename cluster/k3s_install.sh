@@ -27,6 +27,15 @@ if [ -f /tmp/k3s-install-complete ]; then
   exit 0
 fi
 
+# Instance metadata via IMDSv2 (the instance enforces http_tokens=required)
+imds_get() {
+  local path=$1 token
+  token=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+  curl -s -H "X-aws-ec2-metadata-token: $token" \
+    "http://169.254.169.254/latest/meta-data/$path" 2>/dev/null || echo "<unknown>"
+}
+
 wait_for_system() {
   echo "[INFO] Performing system readiness checks..."
   local max_boot_wait=90
@@ -317,7 +326,7 @@ expose_monitoring() {
   { echo "===== FINAL monitoring services ====="; k3s kubectl get svc -n monitoring || true; echo "===== Grafana YAML ====="; k3s kubectl get svc "$grafana_svc" -n monitoring -o yaml || true; echo "===== Prometheus YAML ====="; k3s kubectl get svc "$prom_svc" -n monitoring -o yaml || true; } >> "$log_file" 2>&1 || true
 
   local ip
-  ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+  ip=$(imds_get public-ipv4)
   echo "[INFO] Monitoring endpoints (once pods Ready):" | tee -a "$log_file"
   echo "  - Grafana:    http://${ip}:${grafana_node_port}/ (user: admin; password: see Grafana secret / SSM parameter)" | tee -a "$log_file"
   echo "  - Prometheus: http://${ip}:${prom_node_port}/" | tee -a "$log_file"
@@ -401,7 +410,7 @@ VALUES
 
   echo "[INFO] Service endpoints (once Ready):"
   local node_ip
-  node_ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+  node_ip=$(imds_get public-ipv4)
   echo "  - Ingress (traefik): http://${node_ip}/"
   echo "  - NodePort:          http://${node_ip}:${HELLO_NODE_PORT}/"
 
@@ -442,7 +451,7 @@ finalize_installation() {
   if [ "${NODE_INDEX:-0}" = "0" ]; then
     echo "[SUCCESS] k3s server installation completed!"
     local ip
-    ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+    ip=$(imds_get public-ipv4)
     echo "[INFO] Services available (once pods ready):"
     echo "  - Hello World: http://$ip/"
     [ "${ENABLE_MONITORING}" = "true" ] && echo "  - Prometheus/Grafana via NodePorts (cluster-local)"
