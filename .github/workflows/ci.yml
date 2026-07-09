@@ -139,6 +139,21 @@ jobs:
           tflint --init
           tflint --recursive -f compact
 
+  packer:
+    name: Packer — init & validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-packer@v3
+
+      - name: Packer init & validate
+        working-directory: packer
+        run: |
+          packer init .
+          packer validate .
+
   helm:
     name: Helm — lint & render
     runs-on: ubuntu-latest
@@ -186,8 +201,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Report HIGH+ to the Security tab without failing (a public demo
-      # endpoint intentionally trips some HIGH checks) …
+      # Report HIGH+ to the Security tab (non-blocking; the gate step below
+      # is what fails the build) …
       - name: Trivy config scan (report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -204,14 +219,16 @@ jobs:
         with:
           sarif_file: trivy-config.sarif
 
-      # … but fail the build on CRITICAL misconfigurations.
-      - name: Trivy config scan (gate on CRITICAL)
+      # … and fail the build on HIGH or CRITICAL misconfigurations. Accepted
+      # findings carry inline trivy:ignore justifications or .trivyignore
+      # entries with rationale — the gate stays honest for everything else.
+      - name: Trivy config scan (gate on HIGH+)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
           format: table
-          severity: CRITICAL
+          severity: HIGH,CRITICAL
           exit-code: '1'
 
   image-scan:

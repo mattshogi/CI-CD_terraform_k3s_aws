@@ -31,6 +31,10 @@ locals {
     K3S_TOKEN              = ""
     ENABLE_MONITORING      = var.enable_monitoring ? "true" : "false"
     ENABLE_INGRESS_NGINX   = var.enable_ingress_nginx ? "true" : "false"
+    ENABLE_TLS             = var.enable_tls ? "true" : "false"
+    ENABLE_GITOPS          = var.enable_gitops ? "true" : "false"
+    GITOPS_REPO_URL        = "https://github.com/${var.github_repository}"
+    GITOPS_REF             = var.repo_ref
     APP_IMAGE              = var.app_image
     HELLO_NODE_PORT        = tostring(var.hello_node_port)
     INSTALL_SCRIPT_URL     = local.install_script_url
@@ -54,16 +58,46 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# Packer-baked node image (see packer/ and the bake-ami workflow)
+data "aws_ami" "baked" {
+  count       = var.use_baked_ami ? 1 : 0
+  most_recent = true
+  owners      = ["self"]
+  filter {
+    name   = "name"
+    values = ["k3s-node-*"]
+  }
+}
+
 #
 # Network: create a VPC unless reusing an existing one
 #
+
+# Not every AZ offers every instance type (us-east-1e has no t3.medium);
+# pin the subnet to an AZ that actually carries the requested type.
+data "aws_ec2_instance_type_offerings" "requested" {
+  location_type = "availability-zone"
+
+  filter {
+    name   = "instance-type"
+    values = [var.instance_type]
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = length(self.locations) > 0
+      error_message = "Instance type ${var.instance_type} is not offered in any AZ of this region."
+    }
+  }
+}
 
 module "network" {
   count  = var.vpc_id == "" ? 1 : 0
   source = "./modules/network"
 
-  environment = var.environment
-  name_suffix = var.resource_name_suffix
+  environment       = var.environment
+  name_suffix       = var.resource_name_suffix
+  availability_zone = sort(data.aws_ec2_instance_type_offerings.requested.locations)[0]
 }
 
 # When reusing an existing VPC, find its public subnets (any subnet that maps
@@ -153,18 +187,20 @@ resource "aws_ssm_parameter" "grafana_admin_password" {
 module "k3s_server" {
   source = "./modules/k3s-node"
 
-  name          = local.name
-  vpc_id        = local.vpc_id
-  subnet_id     = local.subnet_id
-  ami_id        = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
+  name      = local.name
+  vpc_id    = local.vpc_id
+  subnet_id = local.subnet_id
+  # Precedence: explicit override > baked AMI > stock Ubuntu
+  ami_id        = var.ami_id != "" ? var.ami_id : (var.use_baked_ami ? data.aws_ami.baked[0].id : data.aws_ami.ubuntu.id)
   instance_type = var.instance_type
   key_name      = var.ssh_key_name
 
   iam_instance_profile = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : ""
   user_data            = local.user_data
 
-  admin_cidr  = var.admin_cidr
-  admin_ports = concat([6443], local.admin_node_ports)
+  public_ports = var.enable_tls ? [80, 443] : [80]
+  admin_cidr   = var.admin_cidr
+  admin_ports  = concat([6443], local.admin_node_ports)
 
   depends_on = [time_sleep.iam_propagation_delay]
 }

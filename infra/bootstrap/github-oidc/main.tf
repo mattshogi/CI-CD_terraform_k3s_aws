@@ -99,6 +99,8 @@ resource "aws_iam_role_policy" "deploy_permissions" {
           "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
           "iam:ListInstanceProfilesForRole",
           "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+          # inline policies (flow-logs role uses one)
+          "iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy",
           "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
           "iam:GetInstanceProfile", "iam:TagInstanceProfile",
           "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
@@ -114,8 +116,26 @@ resource "aws_iam_role_policy" "deploy_permissions" {
         Action   = ["iam:PassRole"]
         Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/k3s-*"
         Condition = {
-          StringEquals = { "iam:PassedToService" = "ec2.amazonaws.com" }
+          StringEquals = {
+            "iam:PassedToService" = ["ec2.amazonaws.com", "vpc-flow-logs.amazonaws.com"]
+          }
         }
+      },
+      {
+        Sid    = "FlowLogGroups"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup", "logs:DeleteLogGroup",
+          "logs:PutRetentionPolicy", "logs:TagResource", "logs:UntagResource",
+          "logs:ListTagsForResource", "logs:ListTagsLogGroup",
+        ]
+        Resource = "arn:aws:logs:*:${data.aws_caller_identity.current.account_id}:log-group:/vpc-flow-logs/*"
+      },
+      {
+        Sid      = "DescribeLogGroups" # not reliably resource-scopable
+        Effect   = "Allow"
+        Action   = ["logs:DescribeLogGroups"]
+        Resource = "*"
       },
       {
         Sid    = "SsmParametersAndDiagnostics"

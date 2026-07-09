@@ -1,4 +1,19 @@
-# Add CVE identifiers (one per line) to ignore specific vulnerabilities.
-# Example:
-# CVE-2023-12345
-# Rationale: False positive due to ...
+# Accepted findings, one per line, with rationale. Anything not listed here
+# (or inline-ignored at the resource with a justification) fails the gate.
+
+# Kubernetes probes (readiness/liveness in the chart) are the health
+# mechanism; Docker HEALTHCHECK is redundant in-cluster and impossible in a
+# distroless image (no shell to run a check with).
+AVD-DS-0026
+
+# Chart templates intentionally omit metadata.namespace — Helm assigns the
+# release namespace (installed with -n hello-world --create-namespace).
+AVD-KSV-0110
+
+# CPU limits are deliberately unset: CPU is compressible and hard limits
+# cause throttling; the chart sets CPU requests + memory limits instead.
+AVD-KSV-0011
+
+# GHCR is our registry of record (images built and pushed by this repo's CI,
+# deployed by immutable sha- tag); it's not in Trivy's default trusted list.
+AVD-KSV-0125

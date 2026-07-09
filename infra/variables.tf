@@ -17,9 +17,15 @@ variable "instance_type" {
 }
 
 variable "ami_id" {
-  description = "Optional override for the EC2 AMI id. Leave blank to auto-select the latest Ubuntu 22.04 LTS (amd64, hvm, ebs)."
+  description = "Optional override for the EC2 AMI id. Leave blank to auto-select (see use_baked_ami)."
   type        = string
   default     = ""
+}
+
+variable "use_baked_ami" {
+  description = "Use the most recent Packer-baked k3s-node-* AMI (from the bake-ami workflow) instead of stock Ubuntu 22.04 — pre-installed k3s binary/images/helm cut boot time substantially. Ignored when ami_id is set."
+  type        = bool
+  default     = false
 }
 
 variable "vpc_id" {
@@ -48,6 +54,18 @@ variable "enable_ssm" {
 
 variable "enable_monitoring" {
   description = "Install the kube-prometheus-stack (Prometheus + Grafana)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_tls" {
+  description = "Install cert-manager and serve the app over HTTPS at <public-ip>.sslip.io with a self-signed ClusterIssuer (no external DNS required). Swap the issuer for Let's Encrypt when fronting with a real domain."
+  type        = bool
+  default     = true
+}
+
+variable "enable_gitops" {
+  description = "Deploy the app via Flux (GitRepository + HelmRelease reconciling charts/hello-world from this repo) instead of a push-time helm install. Falls back to direct Helm if Flux fails."
   type        = bool
   default     = false
 }

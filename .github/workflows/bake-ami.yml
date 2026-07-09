@@ -1,0 +1,87 @@
+name: Bake k3s AMI
+
+# Builds the pre-baked k3s node AMI with Packer. Run on demand (or after
+# meaningful bootstrap changes); deploys opt in via use_baked_ami=true.
+# Uses the account's default VPC for the temporary build instance.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: Build instance type
+        type: string
+        default: t3.small
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: bake-ami
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  bake:
+    name: Packer build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        if: vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: bake-ami-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: vars.AWS_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Preflight — default VPC must exist
+        run: |
+          if [ "$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'length(Vpcs)' --output text)" = "0" ]; then
+            echo "::error::No default VPC in ${AWS_REGION} — create one: aws ec2 create-default-vpc"
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-packer@v3
+
+      - name: Packer init & validate
+        working-directory: packer
+        run: |
+          packer init .
+          packer validate -var "instance_type=${INSTANCE_TYPE}" .
+        env:
+          INSTANCE_TYPE: ${{ inputs.instance_type }}
+
+      - name: Packer build
+        working-directory: packer
+        run: packer build -color=false -var "instance_type=${INSTANCE_TYPE}" . | tee packer-build.log
+        env:
+          INSTANCE_TYPE: ${{ inputs.instance_type }}
+
+      - name: Job summary
+        if: always()
+        working-directory: packer
+        run: |
+          ami=$(grep -oE 'ami-[0-9a-f]{17}' packer-build.log | tail -1 || true)
+          {
+            echo "## AMI bake"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| AMI | \`${ami:-build failed}\` |"
+            echo "| Region | \`${AWS_REGION}\` |"
+            echo ""
+            echo "Deploy with it: dispatch **Deploy Ephemeral Environment** with \`use_baked_ami=true\` (Terraform picks the most recent \`k3s-node-*\` AMI)."
+          } >> "$GITHUB_STEP_SUMMARY"
