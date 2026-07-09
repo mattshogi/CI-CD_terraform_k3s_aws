@@ -43,6 +43,10 @@ resource "aws_security_group" "node" {
     }
   }
 
+  # Accepted risk: the node bootstraps from the public internet (get.k3s.io,
+  # apt, GHCR, Helm repos) and has no NAT/proxy in this single-node topology,
+  # so egress stays open. Revisit if a VPC endpoint/proxy architecture lands.
+  #trivy:ignore:AVD-AWS-0104
   egress {
     description = "all egress (image pulls, package installs, SSM)"
     from_port   = 0
