@@ -68,6 +68,3 @@ temp/
 # Packer
 packer_cache/
 crash.log
-
-# Private interview-prep notes (publish deliberately if ever)
-WAR_STORIES.md
