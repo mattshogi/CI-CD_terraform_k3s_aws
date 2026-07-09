@@ -136,12 +136,56 @@ working scope. The path back to multi-node is explicit: instantiate
 token (via SSM Parameter Store), plus a load balancer in front — the module
 boundaries were drawn to make that additive, not a rewrite.
 
+## 11. TLS: self-signed ClusterIssuer + sslip.io, not Let's Encrypt
+
+**Choice:** cert-manager with a self-signed ClusterIssuer, certificates for
+`<public-ip>.sslip.io` (wildcard DNS that resolves to the embedded IP).
+**Rejected:** Let's Encrypt; skipping TLS entirely.
+
+Ephemeral environments get a fresh public IP every run, so there's no stable
+DNS name for ACME to validate — and LE rate-limits per registered domain,
+which shared wildcard-DNS domains like sslip.io burn through. The self-signed
+issuer exercises the entire cert-manager machinery (issuer → certificate →
+secret → SNI-matched serving via Traefik) with zero external dependencies;
+swapping to production TLS is one ClusterIssuer plus one annotation once a
+real domain exists. Browsers warn — accepted and documented.
+
+## 12. GitOps as a mode, not a mandate
+
+**Choice:** Flux (source + helm controllers only) behind `enable_gitops`,
+default off; a full-SHA ref pins the GitRepository to a commit, a branch ref
+reconciles continuously.
+**Rejected:** Argo CD; making GitOps the only deploy path.
+
+Argo CD's UI is nice but its footprint doesn't fit a t3.small already
+running a monitoring stack; Flux's two needed controllers do. GitOps stays a
+flag because the two modes prove different things: push-time Helm proves the
+artifact pipeline; Flux proves drift-corrected reconciliation. The SHA-vs-
+branch ref split resolves the tension between GitOps ("track a branch") and
+ephemeral reproducibility ("pin everything") instead of pretending it doesn't
+exist. Flux failure degrades gracefully to the direct Helm path.
+
+## 13. Baked AMIs as an opt-in accelerator
+
+**Choice:** Packer bakes deps + Helm + the k3s binary + airgap images, but
+NOT an enabled k3s service; boot-time installer detects the baked binary
+(`INSTALL_K3S_SKIP_DOWNLOAD`) and only renders the service unit.
+**Rejected:** fully-configured golden image; making the baked AMI the default.
+
+Node identity and runtime flags are per-instance concerns — baking a started
+k3s would freeze them and leak bake-time state into every instance. Skipping
+just the downloads keeps one bootstrap code path for both AMI types while
+removing its slowest steps. Opt-in (`use_baked_ami`) because stock-Ubuntu
+boots must keep working: the baked image is an optimization, not a
+dependency, and bakes only happen when someone runs the workflow.
+
 ## Known limitations / future work
 
-- No TLS on the public endpoint (would add cert-manager + a domain).
-- Helm releases are applied by the bootstrap script, not reconciled — GitOps
-  (Flux/Argo CD) would replace push-time `helm install` with drift-corrected
-  pull.
-- Bake an AMI (Packer) to cut boot time and remove boot-time downloads.
-- The Trivy image gate blocks CRITICAL only; ratchet to HIGH as the base
-  image churn allows.
+- Let's Encrypt issuer + real domain for browser-trusted TLS (see #11).
+- Multi-node: instantiate `modules/k3s-node` for agents with the join token
+  via SSM Parameter Store (see #10).
+- Scheduled AMI re-bakes (patch currency) and pruning of old `k3s-node-*`
+  AMIs/snapshots.
+- S3 lifecycle rule to expire orphaned `ephemeral/*` state objects.
+- The Trivy image gate blocks CRITICAL only; ratchet to HIGH as base-image
+  churn allows (the IaC gate already blocks HIGH+).

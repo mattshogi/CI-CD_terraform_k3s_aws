@@ -46,12 +46,23 @@ flowchart TB
     OP -.->|SSM Session Manager - no inbound ports| EC2
 ```
 
-**Security posture:** only port 80 is public. SSH, the Kubernetes API, and
-NodePorts are restricted to `admin_cidr` (closed entirely by default);
-day-to-day access is AWS SSM Session Manager, which needs no inbound rules.
-IMDSv2 is enforced, the root volume is encrypted, containers run non-root
-from a distroless image, and the Grafana password lives in SSM Parameter
-Store — never in code or logs.
+**Security posture:** only the web ports (80, and 443 when TLS is on) are
+public. SSH, the Kubernetes API, and NodePorts are restricted to `admin_cidr`
+(closed entirely by default); day-to-day access is AWS SSM Session Manager,
+which needs no inbound rules. IMDSv2 is enforced, the root volume is
+encrypted, VPC flow logs ship to CloudWatch, containers run non-root from a
+distroless image, and the Grafana password lives in SSM Parameter Store —
+never in code or logs.
+
+### Feature flags
+
+| Terraform variable | Default | Effect |
+| --- | --- | --- |
+| `enable_tls` | `true` | cert-manager + self-signed ClusterIssuer; HTTPS at `https://<ip>.sslip.io/` (swap the issuer for Let's Encrypt with a real domain) |
+| `enable_monitoring` | `false` (CI: `true`) | kube-prometheus-stack; Grafana password in SSM Parameter Store |
+| `enable_gitops` | `false` | Flux `GitRepository` + `HelmRelease` reconciles the chart from this repo instead of push-time `helm install` |
+| `use_baked_ami` | `false` | Boot from the latest Packer-baked `k3s-node-*` AMI (pre-installed k3s/images/helm) instead of stock Ubuntu |
+| `admin_cidr` | `""` (closed) | CIDR allowed on SSH/6443/NodePorts; CI sets the runner IP |
 
 ## Repository layout
 
@@ -60,11 +71,12 @@ Store — never in code or logs.
 ├── charts/hello-world/     # Helm chart — the single deployment definition
 ├── cluster/                # EC2 user_data + k3s bootstrap (checksum-verified)
 ├── infra/                  # Terraform root (S3 remote state, partial config)
-│   ├── modules/network/    #   VPC, public subnet, routing
+│   ├── modules/network/    #   VPC, public subnet, routing, flow logs
 │   ├── modules/k3s-node/   #   hardened EC2 + locked-down security group
 │   └── bootstrap/github-oidc/  # one-time: OIDC provider + CI deploy role
+├── packer/                 # Pre-baked k3s node AMI template
 ├── scripts/                # State bootstrap, endpoint/cluster validation, SSM diagnostics
-└── .github/workflows/      # ci.yml · deploy-ephemeral.yml · release.yml
+└── .github/workflows/      # ci.yml · deploy-ephemeral.yml · bake-ami.yml · release.yml
 ```
 
 ## Quick start (local)
@@ -116,8 +128,9 @@ One-time bootstrap, in order:
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | push / PR | Test, lint, build+push image, Trivy (image + IaC), gitleaks, Helm render, integration tests |
-| `deploy-ephemeral.yml` | manual dispatch | Provision → validate → destroy; per-run S3 state key; deploys the CI-built image for the exact commit |
+| `ci.yml` | push / PR | Test, lint (Go/Terraform/Helm/Packer), build+push image, Trivy (image + IaC, gates on HIGH+), gitleaks, integration tests |
+| `deploy-ephemeral.yml` | manual dispatch | Provision → validate → destroy; per-run S3 state key; deploys the CI-built image for the exact commit; TLS/GitOps/baked-AMI toggles |
+| `bake-ami.yml` | manual dispatch | Packer-builds the pre-baked `k3s-node-*` AMI |
 | `release.yml` | `v*` tag | Multi-arch semver images + GitHub release with binaries |
 
 The ephemeral deploy always destroys by default (`keep_after_validate=false`).
@@ -130,6 +143,7 @@ than hunting orphaned resources in the console.
 | Service | Access | Notes |
 | --- | --- | --- |
 | Hello World | `http://<ip>/` | public (Traefik ingress) |
+| Hello World (TLS) | `https://<ip>.sslip.io/` | public; self-signed issuer, so `curl -k` / browser warning expected |
 | Hello World (NodePort) | `http://<ip>:30080/` | `admin_cidr` only |
 | Grafana | `http://<ip>:30030/` | `admin_cidr` only; password: `aws ssm get-parameter --name "$(terraform -chdir=infra output -raw grafana_password_ssm_parameter)" --with-decryption --query Parameter.Value --output text` |
 | Prometheus | `http://<ip>:30900/` | `admin_cidr` only |
