@@ -1,19 +1,57 @@
 replicaCount: 1
 
 image:
-  repository: hashicorp/http-echo
-  tag: "0.2.3"
+  # The image built and pushed by this repo's CI pipeline. CI overrides the
+  # tag with the immutable digest of the exact build being deployed.
+  repository: ghcr.io/mattshogi/ci-cd_terraform_k3s_aws/hello-world
+  tag: "latest"
   pullPolicy: IfNotPresent
 
+# Extra container args. Empty for the Go app; the bootstrap fallback image
+# (hashicorp/http-echo) sets ["-text=..."] here.
+args: []
+
+containerPort: 5678
+
 service:
-  type: ClusterIP
+  # NodePort so the demo endpoint is reachable without a cloud LoadBalancer
+  # (single-node k3s on EC2). Set to ClusterIP when fronting with ingress only.
+  type: NodePort
   port: 80
-  targetPort: 5678
+  nodePort: 30080
 
 ingress:
   enabled: true
+  className: traefik
   annotations: {}
   path: /
-  hosts:
-    - host: ""
+  # Empty host = match any host (demo is accessed by raw public IP)
+  host: ""
   tls: []
+
+probes:
+  # The Go app exposes /healthz; override to "/" for images without it.
+  path: /healthz
+
+resources:
+  requests:
+    cpu: 5m
+    memory: 16Mi
+  limits:
+    memory: 48Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nameOverride: ""
+fullnameOverride: ""
