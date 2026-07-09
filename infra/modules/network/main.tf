@@ -17,6 +17,10 @@ resource "aws_vpc" "main" {
   }
 }
 
+# Accepted risk: this is deliberately a public subnet — the demo node serves
+# HTTP directly and there is no NAT gateway / load balancer in this topology
+# (cost). Private subnets + NAT would be the first change for a real service.
+#trivy:ignore:AVD-AWS-0164
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.public_subnet_cidr
