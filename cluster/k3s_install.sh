@@ -14,6 +14,7 @@ echo "[INFO] Environment: NODE_INDEX=${NODE_INDEX:-}, SERVER_IP=${SERVER_IP:-}, 
 # Optional feature flags (export in user-data before invoking if desired)
 ENABLE_INGRESS_NGINX=${ENABLE_INGRESS_NGINX:-false}
 ENABLE_MONITORING=${ENABLE_MONITORING:-false}
+ENABLE_TLS=${ENABLE_TLS:-false}
 APP_IMAGE=${APP_IMAGE:-hashicorp/http-echo:0.2.3}
 HELLO_NODE_PORT=${HELLO_NODE_PORT:-30080}
 INSTALL_DOCKER=${INSTALL_DOCKER:-false}
@@ -196,6 +197,9 @@ setup_helm_repos() {
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
   helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx || true
   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+  if [ "${ENABLE_TLS}" = "true" ]; then
+    helm repo add jetstack https://charts.jetstack.io || true
+  fi
   helm repo update || true
   echo "[INFO] Helm repositories configured"
 }
@@ -332,6 +336,35 @@ expose_monitoring() {
   echo "  - Prometheus: http://${ip}:${prom_node_port}/" | tee -a "$log_file"
 }
 
+install_cert_manager() {
+  if [ "${NODE_INDEX:-0}" != "0" ] || [ "${ENABLE_TLS}" != "true" ]; then
+    return 0
+  fi
+  echo "[INFO] Installing cert-manager (self-signed ClusterIssuer)..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  helm upgrade --install cert-manager jetstack/cert-manager \
+    --namespace cert-manager --create-namespace \
+    --set crds.enabled=true \
+    --wait --timeout 5m || {
+    echo "[WARN] cert-manager install failed; continuing without TLS" >&2
+    ENABLE_TLS=false
+    return 0
+  }
+  # Self-signed issuer: demonstrates the full cert-manager machinery with no
+  # external DNS/domain dependency (ephemeral IPs). For a real domain, add a
+  # ClusterIssuer with an ACME (Let's Encrypt) solver and reference it in the
+  # ingress annotation instead.
+  cat <<'ISSUER' | k3s kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+ISSUER
+  echo "[INFO] cert-manager ready; ClusterIssuer 'selfsigned' created"
+}
+
 # Fetch the repo source tarball at the pinned ref so the Helm chart deployed
 # on the instance is the exact chart version Terraform planned against.
 fetch_chart_source() {
@@ -371,12 +404,31 @@ deploy_hello_world() {
   # Split repository:tag for the chart's image values
   local image_repo="${APP_IMAGE%:*}"
   local image_tag="${APP_IMAGE##*:}"
-  echo "[INFO] Deploying hello-world via Helm (image ${APP_IMAGE}, nodePort ${HELLO_NODE_PORT})"
+  # TLS values: certificate for <public-ip>.sslip.io (wildcard DNS → this
+  # host resolves to the instance with no DNS setup). The hostless HTTP rule
+  # keeps plain http://<ip>/ working alongside.
+  : > /tmp/tls-values.yaml
+  if [ "${ENABLE_TLS}" = "true" ]; then
+    local public_ip tls_host
+    public_ip=$(imds_get public-ipv4)
+    tls_host="${public_ip}.sslip.io"
+    cat > /tmp/tls-values.yaml <<TLSVALUES
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned
+  tls:
+    - hosts: ["${tls_host}"]
+      secretName: hello-world-tls
+TLSVALUES
+    echo "[INFO] TLS enabled for https://${tls_host}/"
+  fi
+  echo "[INFO] Deploying hello-world via Helm (image ${APP_IMAGE}, nodePort ${HELLO_NODE_PORT}, tls=${ENABLE_TLS})"
   if helm upgrade --install hello-world "${CHART_DIR}" \
     --namespace hello-world --create-namespace \
     --set image.repository="${image_repo}" \
     --set image.tag="${image_tag}" \
     --set service.nodePort="${HELLO_NODE_PORT}" \
+    -f /tmp/tls-values.yaml \
     --wait --timeout 5m; then
     echo "[INFO] hello-world deployed"
   else
@@ -400,6 +452,7 @@ VALUES
     helm upgrade --install hello-world "${CHART_DIR}" \
       --namespace hello-world --create-namespace \
       -f /tmp/fallback-values.yaml \
+      -f /tmp/tls-values.yaml \
       --set service.nodePort="${HELLO_NODE_PORT}" \
       --wait --timeout 3m || {
       echo "[ERROR] Fallback deployment also failed" >&2
@@ -516,6 +569,7 @@ main() {
   install_helm
   setup_helm_repos
   install_ingress
+  install_cert_manager
   fetch_chart_source
   deploy_hello_world
   wait_for_hello_world_ingress || true

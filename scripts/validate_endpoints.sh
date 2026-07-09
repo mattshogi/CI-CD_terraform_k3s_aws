@@ -64,6 +64,17 @@ fi
 
 echo "[INFO] Hello World reachable (ingress_first_seen=${ingress_first_seen:-none} nodeport_first_seen=${nodeport_first_seen:-none})"
 
+# HTTPS via cert-manager (self-signed issuer → -k). sslip.io wildcard DNS
+# resolves <ip>.sslip.io to the instance, so SNI matches the issued cert.
+TLS_HOST="${SERVER_IP}.sslip.io"
+echo "[INFO] Testing HTTPS (https://${TLS_HOST}/)..."
+if curl -sk --max-time 8 "https://${TLS_HOST}/" | grep -qi "Hello"; then
+  issuer=$(echo | openssl s_client -connect "${SERVER_IP}:443" -servername "${TLS_HOST}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null || echo "issuer=<unreadable>")
+  echo "[SUCCESS] HTTPS serving (${issuer})"
+else
+  echo "[WARN] HTTPS not reachable (TLS disabled, cert still provisioning, or port 443 closed)"
+fi
+
 # Optional monitoring endpoints — NodePorts are only open to admin_cidr, so
 # these succeed only when run from an allowed IP (e.g. the CI runner that
 # deployed with its own IP as admin_cidr).

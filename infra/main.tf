@@ -31,6 +31,7 @@ locals {
     K3S_TOKEN              = ""
     ENABLE_MONITORING      = var.enable_monitoring ? "true" : "false"
     ENABLE_INGRESS_NGINX   = var.enable_ingress_nginx ? "true" : "false"
+    ENABLE_TLS             = var.enable_tls ? "true" : "false"
     APP_IMAGE              = var.app_image
     HELLO_NODE_PORT        = tostring(var.hello_node_port)
     INSTALL_SCRIPT_URL     = local.install_script_url
@@ -163,8 +164,9 @@ module "k3s_server" {
   iam_instance_profile = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : ""
   user_data            = local.user_data
 
-  admin_cidr  = var.admin_cidr
-  admin_ports = concat([6443], local.admin_node_ports)
+  public_ports = var.enable_tls ? [80, 443] : [80]
+  admin_cidr   = var.admin_cidr
+  admin_ports  = concat([6443], local.admin_node_ports)
 
   depends_on = [time_sleep.iam_propagation_delay]
 }

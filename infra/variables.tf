@@ -52,6 +52,12 @@ variable "enable_monitoring" {
   default     = false
 }
 
+variable "enable_tls" {
+  description = "Install cert-manager and serve the app over HTTPS at <public-ip>.sslip.io with a self-signed ClusterIssuer (no external DNS required). Swap the issuer for Let's Encrypt when fronting with a real domain."
+  type        = bool
+  default     = true
+}
+
 variable "enable_ingress_nginx" {
   description = "Install nginx ingress controller instead of k3s's bundled traefik."
   type        = bool
