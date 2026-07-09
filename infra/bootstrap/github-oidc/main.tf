@@ -122,6 +122,7 @@ resource "aws_iam_role_policy" "deploy_permissions" {
         Effect = "Allow"
         Action = [
           "ssm:PutParameter", "ssm:GetParameter", "ssm:DeleteParameter",
+          "ssm:DescribeParameters", # provider reads metadata after create
           "ssm:ListTagsForResource", "ssm:AddTagsToResource",
           "ssm:SendCommand", "ssm:GetCommandInvocation",
         ]
