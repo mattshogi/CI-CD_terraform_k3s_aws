@@ -4,8 +4,9 @@
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
-.terraform.lock.hcl
-tfplan
+# NOTE: .terraform.lock.hcl is intentionally tracked (reproducible provider versions)
+tfplan*
+backend.hcl
 .DS_Store
 
 # Logs
