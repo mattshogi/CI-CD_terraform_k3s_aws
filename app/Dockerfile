@@ -1,9 +1,16 @@
-FROM golang:1.21-alpine AS builder
-WORKDIR /src
-COPY go.mod main.go ./
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o hello .
+# syntax=docker/dockerfile:1
 
-FROM alpine:3.18
-COPY --from=builder /src/hello /usr/local/bin/hello
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+# Copy module files first so dependency download stays cached across code edits
+COPY go.mod ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/hello .
+
+# Distroless static: no shell, no package manager, runs as non-root (uid 65532)
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/hello /hello
 EXPOSE 5678
-ENTRYPOINT ["/usr/local/bin/hello"]
+USER nonroot:nonroot
+ENTRYPOINT ["/hello"]
