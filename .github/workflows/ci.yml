@@ -1,0 +1,265 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: mattshogi/ci-cd_terraform_k3s_aws/hello-world
+
+jobs:
+  go:
+    name: Go — format, vet, staticcheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache: false # no module dependencies yet
+
+      - name: gofmt check
+        working-directory: app
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        working-directory: app
+        run: go vet ./...
+
+      - name: staticcheck
+        working-directory: app
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+      - name: go test
+        working-directory: app
+        run: go test -race -v ./...
+
+      - name: go build
+        working-directory: app
+        run: go build -o hello-world .
+
+  docker:
+    name: Docker — build & push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: go
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      sha_tag: sha-${{ github.sha }}
+      pushed: ${{ steps.mode.outputs.push }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Decide push mode
+        id: mode
+        # Push only on branch pushes; PR builds stay local (least privilege)
+        run: echo "push=${{ github.event_name == 'push' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (and push on branch builds)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          platforms: linux/amd64
+          push: ${{ steps.mode.outputs.push == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  terraform:
+    name: Terraform — fmt, validate, tflint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.x
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive infra
+
+      - name: Terraform init (no backend)
+        working-directory: infra
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        working-directory: infra
+        run: terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: TFLint
+        working-directory: infra
+        run: |
+          tflint --init
+          tflint --recursive -f compact
+
+  helm:
+    name: Helm — lint & render
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: azure/setup-helm@v4
+
+      - name: Helm lint
+        run: helm lint charts/hello-world/
+
+      - name: Render default values
+        run: |
+          helm template hello-world charts/hello-world/ \
+            --set image.tag=sha-${{ github.sha }}
+
+      - name: Render fallback values (http-echo path used by bootstrap)
+        run: |
+          helm template hello-world charts/hello-world/ \
+            --set image.repository=hashicorp/http-echo \
+            --set image.tag=0.2.3 \
+            --set probes.path=/
+
+  secrets-scan:
+    name: Security — gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # scan full history
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  iac-scan:
+    name: Security — IaC misconfig scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+
+      # Report HIGH+ to the Security tab without failing (a public demo
+      # endpoint intentionally trips some HIGH checks) …
+      - name: Trivy config scan (report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
+
+      # … but fail the build on CRITICAL misconfigurations.
+      - name: Trivy config scan (gate on CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          severity: CRITICAL
+          exit-code: '1'
+
+  image-scan:
+    name: Security — image vulnerability scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: docker
+    if: needs.docker.outputs.pushed == 'true'
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Trivy image scan (gate on CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '1'
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: go
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.x
+          terraform_wrapper: false
+
+      - uses: azure/setup-helm@v4
+
+      - name: Run integration tests
+        run: |
+          chmod +x scripts/test-integration.sh
+          ./scripts/test-integration.sh

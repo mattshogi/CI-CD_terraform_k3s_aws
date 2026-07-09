@@ -1,228 +1,169 @@
-# CI/CD - Github Actions - Terraform - k3s - Helm - Prometheus - Grafana - AWS
+# CI/CD Pipeline: GitHub Actions → Terraform → k3s on AWS
 
-[![CI/CD Status](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci-cd.yml/badge.svg?branch=main)](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci-cd.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Terraform](https://img.shields.io/badge/Terraform-1.8%2B-blue.svg)](https://www.terraform.io/)
+[![CI](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mattshogi/CI-CD_terraform_k3s_aws/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Terraform](https://img.shields.io/badge/Terraform-1.11%2B-blue.svg)](https://www.terraform.io/)
 
-## Overview
-
-Lightweight DevOps deployment demonstrating modern infrastructure practices with the following tech stack:
-
-- **Infrastructure**: Terraform + AWS (VPC, EC2, Security Groups)
-- **Container Orchestration**: k3s (lightweight Kubernetes)
-- **Container Runtime**: Docker + containerd
-- **Ingress**: Traefik (default) or optional nginx Ingress Controller
-- **Monitoring**: Prometheus + Grafana
-- **CI/CD**: GitHub Actions
-- **Application**: Go-based Hello World service
+End-to-end demonstration of modern platform engineering: a Go service is
+built, tested, scanned, containerized, and deployed onto an ephemeral
+single-node Kubernetes (k3s) cluster on AWS — provisioned by Terraform,
+validated over HTTP, and torn down automatically. Design decisions and
+trade-offs are documented in [DESIGN.md](DESIGN.md).
 
 ## Architecture
 
-```text
-AWS VPC
-└── Public Subnet
-    └── EC2 Instance (k3s)
-        ├── nginx Ingress Controller (port 80)
-        ├── Hello World App
-        ├── Prometheus (port 30900)
-        └── Grafana (port 30030)
+```mermaid
+flowchart LR
+    subgraph CI["GitHub Actions — ci.yml"]
+        A[Go: fmt / vet / staticcheck / test] --> B[Docker build → GHCR<br/>sha-pinned tag]
+        A --> C[Terraform validate + TFLint]
+        A --> D[Helm lint / render]
+        B --> E[Trivy image scan]
+        F[Trivy IaC scan + gitleaks]
+    end
+
+    subgraph Deploy["deploy-ephemeral.yml (dispatch)"]
+        G[OIDC → AWS role] --> H[terraform apply<br/>state: s3://…/ephemeral/run_id]
+        H --> I[EC2 user_data → k3s bootstrap<br/>checksum-verified, ref-pinned]
+        I --> J[helm install chart<br/>image = CI-built sha tag]
+        J --> K[HTTP endpoint validation]
+        K --> L[terraform destroy<br/>always runs]
+    end
+
+    CI -->|image + chart @ commit SHA| Deploy
 ```
 
-## Quick Start
+```mermaid
+flowchart TB
+    subgraph VPC["AWS VPC (created or reused)"]
+        subgraph EC2["EC2 t3.small — k3s (containerd)"]
+            T[Traefik ingress :80] --> HW[hello-world pod<br/>Go app, distroless, non-root]
+            P[Prometheus] & GF[Grafana]
+        end
+    end
+    U[Public internet] -->|":80 only"| T
+    OP[Operator / CI runner] -->|"admin_cidr only: 6443, NodePorts"| EC2
+    OP -.->|SSM Session Manager - no inbound ports| EC2
+```
 
-### Prerequisites
+**Security posture:** only port 80 is public. SSH, the Kubernetes API, and
+NodePorts are restricted to `admin_cidr` (closed entirely by default);
+day-to-day access is AWS SSM Session Manager, which needs no inbound rules.
+IMDSv2 is enforced, the root volume is encrypted, containers run non-root
+from a distroless image, and the Grafana password lives in SSM Parameter
+Store — never in code or logs.
 
-- AWS CLI configured with appropriate credentials
-- An existing EC2 Key Pair in your AWS region
-- Terraform 1.8+ installed locally (optional for GitHub Actions)
+## Repository layout
 
-### Local Deployment
+```text
+├── app/                    # Go HTTP service + tests + distroless Dockerfile
+├── charts/hello-world/     # Helm chart — the single deployment definition
+├── cluster/                # EC2 user_data + k3s bootstrap (checksum-verified)
+├── infra/                  # Terraform root (S3 remote state, partial config)
+│   ├── modules/network/    #   VPC, public subnet, routing
+│   ├── modules/k3s-node/   #   hardened EC2 + locked-down security group
+│   └── bootstrap/github-oidc/  # one-time: OIDC provider + CI deploy role
+├── scripts/                # State bootstrap, endpoint/cluster validation, SSM diagnostics
+└── .github/workflows/      # ci.yml · deploy-ephemeral.yml · release.yml
+```
+
+## Quick start (local)
+
+Prerequisites: AWS CLI with credentials, Terraform ≥ 1.11.
 
 ```bash
-# Clone and configure
-git clone <repo-url>
+git clone https://github.com/mattshogi/CI-CD_terraform_k3s_aws.git
 cd CI-CD_terraform_k3s_aws
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your EC2 key pair name
 
-# Deploy infrastructure
-terraform -chdir=infra init
-terraform -chdir=infra plan
+# 1. One-time: create the remote-state bucket (versioned, encrypted)
+./scripts/bootstrap_remote_state.sh
+
+# 2. Configure (all optional — see comments in the example file)
+cp infra/terraform.tfvars.example infra/terraform.tfvars
+# set admin_cidr to your IP if you want kubectl/NodePort access
+
+# 3. Deploy
+terraform -chdir=infra init -backend-config=backend.hcl
 terraform -chdir=infra apply
 
-# Get connection info and validate
-terraform -chdir=infra output server_public_ip
-./scripts/validate_k3s_status.sh <server_ip>
-./scripts/validate_endpoints.sh <server_ip>
-```
+# 4. Validate & explore
+IP=$(terraform -chdir=infra output -raw server_public_ip)
+./scripts/validate_endpoints.sh "$IP"
+aws ssm start-session --target "$(terraform -chdir=infra output -raw server_instance_id)"
 
-### GitHub Actions Deployment
-
-Primary workflow: `.github/workflows/ci-cd.yml`
-
-Jobs include:
-
-1. Go build & test
-2. Docker image build & push (GHCR)
-3. Terraform fmt / validate + TFLint
-4. Helm lint / template
-5. Security scan (Trivy) with gating on CRITICAL vulns
-6. Integration tests (scripts)
-7. (Main branch) Staging plan (no apply by default)
-8. (Dispatch / tags) Production plan
-9. Optional destroy jobs (dispatch inputs)
-10. Ephemeral Apply & Validate (new) — run `terraform apply`, wait, HTTP validate endpoints, optionally auto-destroy
-
-Ephemeral apply is triggered via `workflow_dispatch` inputs:
-
-Inputs of interest:
-
-- `run_apply` (true/false) — enable infra apply & validation
-- `apply_environment` (staging|production label tag)
-- `instance_type_override` (default t3.small)
-- `enable_monitoring` (true/false)
-- `destroy_after_apply` (true/false) — auto teardown after validation
-
-Outputs / artifacts:
-
-- `server_public_ip` (job output)
-- `infra-apply-validation-<run_attempt>` artifact containing `validation/summary.md`
-
-Validation performs repeated curl checks against:
-
-- Root ingress (`http://<ip>/`)
-- Hello NodePort (`:<30080>/`)
-- Grafana NodePort (`:30030/` when monitoring enabled)
-- Prometheus NodePort (`:30900/` when monitoring enabled)
-
-Configure these repository secrets (names must match workflows):
-
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_SSH_KEY_NAME` (EC2 key pair name)  
-- `SSH_PRIVATE_KEY` (optional: for SSH diagnostics; corresponds to the public part of `AWS_SSH_KEY_NAME`)
-
-Optional secrets / variables:
-
-- `AWS_DEFAULT_REGION` (default `us-east-1` if omitted)
-- `VULN_CRITICAL_THRESHOLD` (security gating; default 0)
-
-Ephemeral apply usage:
-
-1. Go to Actions → `CI/CD Pipeline` → Run workflow
-2. Set `run_apply=true` (and adjust other inputs as needed)
-3. Wait for `infra-apply-validate` job; note `server_public_ip` in job summary
-4. Download validation artifact for endpoint results
-5. If you set `destroy_after_apply=false`, remember to manually destroy later (`terraform destroy` or rerun with destroy flags)
-
-## Project Structure
-
-```text
-├── infra/                  # Terraform infrastructure code
-│   ├── main.tf            # Main infrastructure resources
-│   └── outputs.tf         # Infrastructure outputs
-├── cluster/               # k3s installation scripts
-│   ├── k3s_install.sh     # Main installer script
-│   └── user_data.tpl      # EC2 user data template
-├── app/                   # Hello World application
-│   ├── main.go           # Go application code
-│   ├── Dockerfile        # Container definition
-│   └── go.mod            # Go module definition
-├── charts/hello-world/    # Helm chart for application
-└── scripts/              # Validation and utility scripts
-```
-
-## Services Access
-
-After deployment (t3.small recommended when monitoring):
-
-- **Hello World (Ingress)**: `http://<public_ip>/`
-- **Hello World (NodePort)**: `http://<public_ip>:30080/`
-- **Grafana (NodePort)**: `http://<public_ip>:30030/` (admin/admin; only if monitoring enabled)
-- **Prometheus (NodePort)**: `http://<public_ip>:30900/` (only if monitoring enabled)
-
-## Cost Optimization
-
-Cost notes:
-
-- `t3.micro` works for bare cluster + app
-- Use `t3.small` (or larger) when `enable_monitoring=true` to avoid memory pressure / API timeouts
-- Single-node keeps cost minimal
-- Always destroy ephemeral infra you no longer need
-
-## Validation Scripts
-
-The project includes automated validation:
-
-- `scripts/validate_k3s_status.sh <ip>` - Checks cluster health
-- `scripts/validate_endpoints.sh <ip>` - Tests service endpoints
-
-## Cleanup
-
-```bash
+# 5. Tear down
 terraform -chdir=infra destroy
 ```
 
+## CI/CD setup (GitHub Actions)
+
+One-time bootstrap, in order:
+
+1. **State bucket** — `./scripts/bootstrap_remote_state.sh`, then set repo
+   **variable** `TF_STATE_BUCKET` to the bucket name.
+2. **OIDC role** (recommended; no long-lived keys in GitHub):
+
+   ```bash
+   terraform -chdir=infra/bootstrap/github-oidc init
+   terraform -chdir=infra/bootstrap/github-oidc apply -var="state_bucket=<bucket>"
+   ```
+
+   Set the `role_arn` output as repo **variable** `AWS_ROLE_ARN`.
+   (Fallback: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets.)
+3. Optionally set variable `AWS_REGION` (default `us-east-1`).
+
+### Workflows
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `ci.yml` | push / PR | Test, lint, build+push image, Trivy (image + IaC), gitleaks, Helm render, integration tests |
+| `deploy-ephemeral.yml` | manual dispatch | Provision → validate → destroy; per-run S3 state key; deploys the CI-built image for the exact commit |
+| `release.yml` | `v*` tag | Multi-arch semver images + GitHub release with binaries |
+
+The ephemeral deploy always destroys by default (`keep_after_validate=false`).
+Because state is remote and keyed per run (`ephemeral/<run_id>.tfstate`), a
+crashed run leaves recoverable state — re-run destroy against that key rather
+than hunting orphaned resources in the console.
+
+## Services
+
+| Service | Access | Notes |
+| --- | --- | --- |
+| Hello World | `http://<ip>/` | public (Traefik ingress) |
+| Hello World (NodePort) | `http://<ip>:30080/` | `admin_cidr` only |
+| Grafana | `http://<ip>:30030/` | `admin_cidr` only; password: `aws ssm get-parameter --name "$(terraform -chdir=infra output -raw grafana_password_ssm_parameter)" --with-decryption --query Parameter.Value --output text` |
+| Prometheus | `http://<ip>:30900/` | `admin_cidr` only |
+
+## Cost notes
+
+- `t3.micro` suffices for cluster + app; use `t3.small`+ with monitoring
+  (kube-prometheus-stack needs the memory).
+- Single node, no NAT gateway, no load balancer — a few cents per
+  ephemeral run.
+- Ephemeral runs self-destroy; for anything kept, `terraform destroy` when done.
+
 ## Troubleshooting
 
-### Common Issues
-
-1. **SSH Key Issues**: Ensure your EC2 key pair exists and private key is accessible
-2. **Instance Size / OOM**: Monitoring on `t3.micro` may cause k3s API instability — prefer `t3.small`+
-3. **VPC Limits**: Use existing VPC by setting `vpc_id` in terraform.tfvars
-4. **user_data Size**: Large inline scripts exceed 16KB; this repo fetches installer via `install_script_url` to stay small
-5. **Terraform Template Escapes**: Use `$${VAR}` inside `templatefile()` for bash parameter expansions
-
-### Logs
-
-Check these locations on the EC2 instance:
-
-- `/var/log/cloud-init-output.log` - Cloud-init execution
-- `/var/log/user-data.log` - User data script output
-- `sudo journalctl -u k3s` - k3s service logs
+| Symptom | Check |
+| --- | --- |
+| Instance up, app not responding | `aws ssm start-session --target <instance-id>`, then `tail -f /var/log/cloud-init-output.log` and `journalctl -u k3s` |
+| `kubectl` from your machine fails | Is your IP in `admin_cidr`? Port 6443 is closed otherwise |
+| CI deploy fails fast | `TF_STATE_BUCKET` / `AWS_ROLE_ARN` repo variables set? |
+| Image pull fails on instance | Bootstrap falls back to `hashicorp/http-echo` automatically; check GHCR package visibility is public |
+| Monitoring pods pending / OOM | Use `t3.small` or larger |
 
 ## Development
 
-### Local Testing
-
 ```bash
-# Test Go application locally
 cd app
-go run main.go
-
-# Test with Docker
-docker build -t hello-local .
-docker run -p 5678:5678 hello-local
+go test -race ./...        # unit tests
+go run .                   # serves :5678 (PORT env to override)
+docker build -t hello-local . && docker run -p 5678:5678 hello-local
 ```
 
-### Integration Testing
+`./scripts/test-integration.sh` runs the CI integration suite locally
+(Terraform validate, Docker build, container smoke test, Helm lint).
 
-Run the full test suite to validate all components:
+## License
 
-```bash
-./test-integration.sh
-```
-
-This tests:
-
-- Terraform configuration validity
-- Docker build process
-- Application functionality
-- Script syntax
-- Helm chart structure
-- Infrastructure planning
-
-### CI/CD Workflow
-
-The `ci-cd.yml` workflow high-level flow:
-
-1. Build & test Go
-2. Build & push image
-3. Terraform / Helm lint & validate
-4. Security scan (Trivy)
-5. Integration tests
-6. Staging / production plan (no apply by default)
-7. Optional ephemeral apply & endpoint validation (dispatch input)
-8. Optional destroy jobs
-
-Endpoint validation summary artifact provides quick pass/fail on service availability.
+[MIT](LICENSE)

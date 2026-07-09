@@ -1,17 +1,24 @@
 output "server_public_ip" {
-  value = aws_instance.k3s_server.public_ip
-}
-output "server_instance_id" {
-  value = aws_instance.k3s_server.id
-}
-output "security_group_id" {
-  value = aws_security_group.ec2_sg.id
-}
-output "subnet_id" {
-  value = var.vpc_id != "" ? data.aws_subnet.existing[0].id : aws_subnet.public[0].id
+  description = "Public IP of the k3s server."
+  value       = module.k3s_server.public_ip
 }
 
-output "nacl_id" {
-  value       = var.vpc_id != "" ? "<existing-vpc-nacl-not-provided>" : aws_network_acl.public[0].id
-  description = "Network ACL id for the created VPC, or placeholder when reusing an existing VPC."
+output "server_instance_id" {
+  description = "Instance id of the k3s server (use with `aws ssm start-session --target`)."
+  value       = module.k3s_server.instance_id
+}
+
+output "security_group_id" {
+  description = "Security group protecting the k3s server."
+  value       = module.k3s_server.security_group_id
+}
+
+output "subnet_id" {
+  description = "Subnet the server was launched into."
+  value       = local.subnet_id
+}
+
+output "grafana_password_ssm_parameter" {
+  description = "SSM Parameter Store name holding the Grafana admin password (when monitoring is enabled)."
+  value       = var.enable_monitoring ? aws_ssm_parameter.grafana_admin_password[0].name : null
 }

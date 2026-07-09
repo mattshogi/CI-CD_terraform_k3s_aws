@@ -1,13 +1,24 @@
-# Copy this file to terraform.tfvars and update with your values
+# Copy this file to terraform.tfvars and adjust. Everything is optional —
+# the defaults deploy a single SSM-managed node with no SSH and no inbound
+# admin access.
 
-# Required: AWS EC2 Key Pair name (must exist in your AWS account)
-ssh_key_name = "your-ec2-keypair-name"
+# Your public IP (CIDR) for operator access to SSH / kube API / NodePorts.
+# Find it with: curl -s https://checkip.amazonaws.com
+# Leave unset to keep those ports closed (SSM Session Manager still works).
+# admin_cidr = "203.0.113.7/32"
 
-# Optional: Instance type (t3.micro for free tier, t3.small recommended)
+# EC2 key pair name for SSH. Only used when admin_cidr is also set.
+# ssh_key_name = "your-ec2-keypair-name"
+
+# t3.micro suffices for cluster + app; use t3.small+ with monitoring enabled.
 instance_type = "t3.micro"
 
-# Optional: Reuse existing VPC to avoid VPC limits
+# Reuse an existing VPC (avoids per-account VPC limits).
 # vpc_id = "vpc-xxxxxxxxx"
 
-# Optional: Number of k3s agent nodes (0 for single-node cluster)
-k3s_node_count = 0
+# Install Prometheus + Grafana. The Grafana admin password is generated and
+# stored in SSM Parameter Store (see grafana_password_ssm_parameter output).
+enable_monitoring = false
+
+# Pin the ref the instance bootstraps from (CI passes the commit SHA).
+# repo_ref = "main"

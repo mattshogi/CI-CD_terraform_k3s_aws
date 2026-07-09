@@ -6,23 +6,35 @@ set -euo pipefail
 # Start banner
 echo "[INFO] Starting k3s installation at $(date)"
 
-# System information
+# System information (never log secret values — only whether they are set)
 echo "[INFO] System: $(uname -a)"
 echo "[INFO] User: $(whoami)"
-echo "[INFO] Environment variables: NODE_INDEX=${NODE_INDEX:-}, SERVER_IP=${SERVER_IP:-}, K3S_TOKEN=${K3S_TOKEN:-}"
+echo "[INFO] Environment: NODE_INDEX=${NODE_INDEX:-}, SERVER_IP=${SERVER_IP:-}, K3S_TOKEN=$([ -n "${K3S_TOKEN:-}" ] && echo '<set>' || echo '<unset>')"
 
 # Optional feature flags (export in user-data before invoking if desired)
 ENABLE_INGRESS_NGINX=${ENABLE_INGRESS_NGINX:-false}
 ENABLE_MONITORING=${ENABLE_MONITORING:-false}
 APP_IMAGE=${APP_IMAGE:-hashicorp/http-echo:0.2.3}
 HELLO_NODE_PORT=${HELLO_NODE_PORT:-30080}
-INSTALL_DOCKER=${INSTALL_DOCKER:-true}
+INSTALL_DOCKER=${INSTALL_DOCKER:-false}
+REPO_TARBALL_URL=${REPO_TARBALL_URL:-}
+GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}
+CHART_DIR=/opt/repo-src/charts/hello-world
 
 # Idempotency guard
 if [ -f /tmp/k3s-install-complete ]; then
   echo "[INFO] Installation already completed earlier; exiting."
   exit 0
 fi
+
+# Instance metadata via IMDSv2 (the instance enforces http_tokens=required)
+imds_get() {
+  local path=$1 token
+  token=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+  curl -s -H "X-aws-ec2-metadata-token: $token" \
+    "http://169.254.169.254/latest/meta-data/$path" 2>/dev/null || echo "<unknown>"
+}
 
 wait_for_system() {
   echo "[INFO] Performing system readiness checks..."
@@ -96,9 +108,10 @@ install_k3s() {
   echo "[INFO] Installing k3s (early)";
   if [ "${NODE_INDEX:-0}" = "0" ]; then
     echo "[INFO] Installing k3s server..."
-    local extra_exec="--write-kubeconfig-mode=644"
+    # kubeconfig stays root-only (default 600); everything here runs as root
+    local extra_exec=""
     if [ "${ENABLE_INGRESS_NGINX}" = "true" ]; then
-      extra_exec="$extra_exec --disable traefik"
+      extra_exec="--disable traefik"
     fi
     curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$extra_exec" sh -s - server
   else
@@ -229,10 +242,14 @@ install_monitoring() {
   fi
   echo "[INFO] Installing Prometheus and Grafana (this may take several minutes)..."
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  if [ -z "${GRAFANA_ADMIN_PASSWORD}" ]; then
+    echo "[WARN] No Grafana password provided; generating a random one (retrieve via: kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d)"
+    GRAFANA_ADMIN_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)
+  fi
   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
     --namespace monitoring \
     --create-namespace \
-    --set grafana.adminPassword=admin \
+    --set grafana.adminPassword="${GRAFANA_ADMIN_PASSWORD}" \
     --set prometheus.service.nodePort=30900 \
     --set prometheus.service.type=NodePort \
     --set grafana.service.nodePort=30030 \
@@ -309,10 +326,36 @@ expose_monitoring() {
   { echo "===== FINAL monitoring services ====="; k3s kubectl get svc -n monitoring || true; echo "===== Grafana YAML ====="; k3s kubectl get svc "$grafana_svc" -n monitoring -o yaml || true; echo "===== Prometheus YAML ====="; k3s kubectl get svc "$prom_svc" -n monitoring -o yaml || true; } >> "$log_file" 2>&1 || true
 
   local ip
-  ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+  ip=$(imds_get public-ipv4)
   echo "[INFO] Monitoring endpoints (once pods Ready):" | tee -a "$log_file"
-  echo "  - Grafana:    http://${ip}:${grafana_node_port}/ (admin/admin)" | tee -a "$log_file"
+  echo "  - Grafana:    http://${ip}:${grafana_node_port}/ (user: admin; password: see Grafana secret / SSM parameter)" | tee -a "$log_file"
   echo "  - Prometheus: http://${ip}:${prom_node_port}/" | tee -a "$log_file"
+}
+
+# Fetch the repo source tarball at the pinned ref so the Helm chart deployed
+# on the instance is the exact chart version Terraform planned against.
+fetch_chart_source() {
+  if [ "${NODE_INDEX:-0}" != "0" ]; then
+    return 0
+  fi
+  if [ -z "${REPO_TARBALL_URL}" ]; then
+    echo "[WARN] REPO_TARBALL_URL not provided; chart deployment will fail"
+    return 0
+  fi
+  echo "[INFO] Fetching chart source from ${REPO_TARBALL_URL}"
+  mkdir -p /opt/repo-src
+  local attempt
+  for attempt in 1 2 3; do
+    if curl -fsSL "${REPO_TARBALL_URL}" -o /tmp/repo-src.tar.gz; then
+      tar -xzf /tmp/repo-src.tar.gz --strip-components=1 -C /opt/repo-src
+      echo "[INFO] Chart source extracted to /opt/repo-src (attempt $attempt)"
+      return 0
+    fi
+    echo "[WARN] Tarball download attempt $attempt failed"
+    sleep $((attempt * 2))
+  done
+  echo "[ERROR] Failed to fetch chart source after retries" >&2
+  return 1
 }
 
 deploy_hello_world() {
@@ -320,153 +363,54 @@ deploy_hello_world() {
     echo "[INFO] Skipping application deployment on agent node"
     return 0
   fi
-  echo "[INFO] Deploying Hello World application with image ${APP_IMAGE} (traefik ingress)"
+  if [ ! -d "${CHART_DIR}" ]; then
+    echo "[ERROR] Chart directory ${CHART_DIR} missing; cannot deploy application" >&2
+    return 1
+  fi
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-  k3s kubectl create namespace hello-world || true
-  cat <<EOF | k3s kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: hello-world
-  namespace: hello-world
-  labels:
-    app: hello-world
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: hello-world
-  template:
-    metadata:
-      labels:
-        app: hello-world
-    spec:
-      containers:
-      - name: hello
-        image: ${APP_IMAGE}
-        args:
-        - "-text=Hello, World!"
-        ports:
-        - containerPort: 5678
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 5678
-          initialDelaySeconds: 2
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 5678
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        resources:
-          requests:
-            memory: "16Mi"
-            cpu: "5m"
-          limits:
-            memory: "48Mi"
-            cpu: "50m"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: hello-world
-  namespace: hello-world
-  labels:
-    app: hello-world
-spec:
-  selector:
-    app: hello-world
-  ports:
-  - port: 80
-    targetPort: 5678
-    protocol: TCP
-    nodePort: ${HELLO_NODE_PORT}
-  type: NodePort
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: hello-world
-  namespace: hello-world
-  annotations:
-    kubernetes.io/ingress.class: traefik
-spec:
-  ingressClassName: traefik
-  rules:
-  - host: ""
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: hello-world
-            port:
-              number: 80
-EOF
-  echo "[INFO] Hello World application deployed"
-
-  echo "[INFO] Root index deployment removed (using single hello-world ingress)"
-
-  echo "[INFO] Waiting for Hello World pods to become Ready..."
-  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-  local waited=0
-  local timeout=240
-  local fallback_performed=false
-  while [ $waited -lt $timeout ]; do
-    not_ready=$(k3s kubectl get pods -n hello-world --no-headers 2>/dev/null | awk '{split($2,a,"/"); if (a[1] != a[2]) print $0}' | wc -l || echo 1)
-    status_lines=$(k3s kubectl get pods -n hello-world --no-headers 2>/dev/null || true)
-    if [ -n "$status_lines" ]; then
-      echo "[DEBUG] hello-world pod status:\n$status_lines"
-    fi
-    # Detect ImagePullBackOff
-    if echo "$status_lines" | grep -q 'ImagePullBackOff'; then
-      if [ "$APP_IMAGE" != "hashicorp/http-echo:0.2.3" ] && [ "$fallback_performed" = false ]; then
-        echo "[WARN] ImagePullBackOff detected for custom image $APP_IMAGE. Falling back to hashicorp/http-echo:0.2.3"
-        cat <<FALLBACK | k3s kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: hello-world
-  namespace: hello-world
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: hello-world
-  template:
-    metadata:
-      labels:
-        app: hello-world
-    spec:
-      containers:
-      - name: hello
-        image: hashicorp/http-echo:0.2.3
-        args:
-        - "-text=Hello, World fallback image!"
-        ports:
-        - containerPort: 5678
-FALLBACK
-        fallback_performed=true
-        echo "[INFO] Applied fallback deployment; continuing to wait."
-      fi
-    fi
-    if [ "$not_ready" -eq 0 ] && [ -n "$status_lines" ]; then
-      echo "[INFO] Hello World pods Ready"
-      break
-    fi
-    sleep 5
-    waited=$((waited+5))
-  done
-  if [ $waited -ge $timeout ]; then
-    echo "[WARN] Timeout waiting for Hello World pods to become Ready (continuing)." >&2
+  # Split repository:tag for the chart's image values
+  local image_repo="${APP_IMAGE%:*}"
+  local image_tag="${APP_IMAGE##*:}"
+  echo "[INFO] Deploying hello-world via Helm (image ${APP_IMAGE}, nodePort ${HELLO_NODE_PORT})"
+  if helm upgrade --install hello-world "${CHART_DIR}" \
+    --namespace hello-world --create-namespace \
+    --set image.repository="${image_repo}" \
+    --set image.tag="${image_tag}" \
+    --set service.nodePort="${HELLO_NODE_PORT}" \
+    --wait --timeout 5m; then
+    echo "[INFO] hello-world deployed"
+  else
+    # Covers ImagePullBackOff (e.g. GHCR unreachable) and probe failures:
+    # redeploy with a public fallback image that serves the same greeting.
+    echo "[WARN] Deploy with ${APP_IMAGE} failed; falling back to hashicorp/http-echo" >&2
+    cat > /tmp/fallback-values.yaml <<'VALUES'
+image:
+  repository: hashicorp/http-echo
+  tag: "0.2.3"
+args: ["-text=Hello, World! (fallback image)"]
+probes:
+  path: /
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+VALUES
+    helm upgrade --install hello-world "${CHART_DIR}" \
+      --namespace hello-world --create-namespace \
+      -f /tmp/fallback-values.yaml \
+      --set service.nodePort="${HELLO_NODE_PORT}" \
+      --wait --timeout 3m || {
+      echo "[ERROR] Fallback deployment also failed" >&2
+      return 1
+    }
+    echo "[INFO] Fallback hello-world deployed"
   fi
 
   echo "[INFO] Service endpoints (once Ready):"
   local node_ip
-  node_ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+  node_ip=$(imds_get public-ipv4)
   echo "  - Ingress (traefik): http://${node_ip}/"
   echo "  - NodePort:          http://${node_ip}:${HELLO_NODE_PORT}/"
 
@@ -501,12 +445,13 @@ finalize_installation() {
   echo "[INFO] Finalizing installation..."
   apt-get autoremove -y || true
   apt-get autoclean || true
-  chmod 644 /etc/rancher/k3s/k3s.yaml || true
+  # kubeconfig contains the cluster admin credential — keep it root-only
+  chmod 600 /etc/rancher/k3s/k3s.yaml || true
   echo "Installation completed at $(date)" > /tmp/k3s-install-complete
   if [ "${NODE_INDEX:-0}" = "0" ]; then
     echo "[SUCCESS] k3s server installation completed!"
     local ip
-    ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "<unknown>")
+    ip=$(imds_get public-ipv4)
     echo "[INFO] Services available (once pods ready):"
     echo "  - Hello World: http://$ip/"
     [ "${ENABLE_MONITORING}" = "true" ] && echo "  - Prometheus/Grafana via NodePorts (cluster-local)"
@@ -571,6 +516,7 @@ main() {
   install_helm
   setup_helm_repos
   install_ingress
+  fetch_chart_source
   deploy_hello_world
   wait_for_hello_world_ingress || true
   wait_for_nodeport_rule || true
