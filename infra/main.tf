@@ -73,12 +73,31 @@ data "aws_ami" "baked" {
 # Network: create a VPC unless reusing an existing one
 #
 
+# Not every AZ offers every instance type (us-east-1e has no t3.medium);
+# pin the subnet to an AZ that actually carries the requested type.
+data "aws_ec2_instance_type_offerings" "requested" {
+  location_type = "availability-zone"
+
+  filter {
+    name   = "instance-type"
+    values = [var.instance_type]
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = length(self.locations) > 0
+      error_message = "Instance type ${var.instance_type} is not offered in any AZ of this region."
+    }
+  }
+}
+
 module "network" {
   count  = var.vpc_id == "" ? 1 : 0
   source = "./modules/network"
 
-  environment = var.environment
-  name_suffix = var.resource_name_suffix
+  environment       = var.environment
+  name_suffix       = var.resource_name_suffix
+  availability_zone = sort(data.aws_ec2_instance_type_offerings.requested.locations)[0]
 }
 
 # When reusing an existing VPC, find its public subnets (any subnet that maps

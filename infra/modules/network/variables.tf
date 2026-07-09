@@ -20,3 +20,9 @@ variable "public_subnet_cidr" {
   type        = string
   default     = "10.0.1.0/24"
 }
+
+variable "availability_zone" {
+  description = "AZ for the public subnet. Empty lets AWS choose — but pin it to an AZ that actually offers your instance type (not all AZs carry all types; us-east-1e lacks t3.medium, for example)."
+  type        = string
+  default     = ""
+}
