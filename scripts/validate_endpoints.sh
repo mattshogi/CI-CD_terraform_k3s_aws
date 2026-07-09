@@ -66,11 +66,21 @@ echo "[INFO] Hello World reachable (ingress_first_seen=${ingress_first_seen:-non
 
 # HTTPS via cert-manager (self-signed issuer → -k). sslip.io wildcard DNS
 # resolves <ip>.sslip.io to the instance, so SNI matches the issued cert.
+# Retried: certificate issuance can lag first HTTP availability by a minute+.
 TLS_HOST="${SERVER_IP}.sslip.io"
-echo "[INFO] Testing HTTPS (https://${TLS_HOST}/)..."
-if curl -sk --max-time 8 "https://${TLS_HOST}/" | grep -qi "Hello"; then
+TLS_RETRIES=${TLS_RETRIES:-12}
+echo "[INFO] Testing HTTPS (https://${TLS_HOST}/, up to ${TLS_RETRIES} attempts)..."
+https_ok=false
+for i in $(seq 1 "$TLS_RETRIES"); do
+  if curl -sk --max-time 8 "https://${TLS_HOST}/" | grep -qi "Hello"; then
+    https_ok=true
+    break
+  fi
+  [ "$i" -lt "$TLS_RETRIES" ] && sleep 10
+done
+if [ "$https_ok" = true ]; then
   issuer=$(echo | openssl s_client -connect "${SERVER_IP}:443" -servername "${TLS_HOST}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null || echo "issuer=<unreadable>")
-  echo "[SUCCESS] HTTPS serving (${issuer})"
+  echo "[SUCCESS] HTTPS serving after $i attempt(s) (${issuer})"
 else
   echo "[WARN] HTTPS not reachable (TLS disabled, cert still provisioning, or port 443 closed)"
 fi
