@@ -64,6 +64,12 @@ variable "enable_tls" {
   default     = true
 }
 
+variable "enable_gitops" {
+  description = "Deploy the app via Flux (GitRepository + HelmRelease reconciling charts/hello-world from this repo) instead of a push-time helm install. Falls back to direct Helm if Flux fails."
+  type        = bool
+  default     = false
+}
+
 variable "enable_ingress_nginx" {
   description = "Install nginx ingress controller instead of k3s's bundled traefik."
   type        = bool

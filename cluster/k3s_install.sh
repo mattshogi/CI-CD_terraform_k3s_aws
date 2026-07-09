@@ -15,6 +15,9 @@ echo "[INFO] Environment: NODE_INDEX=${NODE_INDEX:-}, SERVER_IP=${SERVER_IP:-}, 
 ENABLE_INGRESS_NGINX=${ENABLE_INGRESS_NGINX:-false}
 ENABLE_MONITORING=${ENABLE_MONITORING:-false}
 ENABLE_TLS=${ENABLE_TLS:-false}
+ENABLE_GITOPS=${ENABLE_GITOPS:-false}
+GITOPS_REPO_URL=${GITOPS_REPO_URL:-}
+GITOPS_REF=${GITOPS_REF:-main}
 APP_IMAGE=${APP_IMAGE:-hashicorp/http-echo:0.2.3}
 HELLO_NODE_PORT=${HELLO_NODE_PORT:-30080}
 INSTALL_DOCKER=${INSTALL_DOCKER:-false}
@@ -207,6 +210,9 @@ setup_helm_repos() {
   if [ "${ENABLE_TLS}" = "true" ]; then
     helm repo add jetstack https://charts.jetstack.io || true
   fi
+  if [ "${ENABLE_GITOPS}" = "true" ]; then
+    helm repo add fluxcd-community https://fluxcd-community.github.io/helm-charts || true
+  fi
   helm repo update || true
   echo "[INFO] Helm repositories configured"
 }
@@ -372,6 +378,26 @@ ISSUER
   echo "[INFO] cert-manager ready; ClusterIssuer 'selfsigned' created"
 }
 
+install_flux() {
+  if [ "${NODE_INDEX:-0}" != "0" ] || [ "${ENABLE_GITOPS}" != "true" ]; then
+    return 0
+  fi
+  echo "[INFO] Installing Flux (source + helm controllers only)..."
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  helm upgrade --install flux2 fluxcd-community/flux2 \
+    --namespace flux-system --create-namespace \
+    --set kustomizeController.create=false \
+    --set notificationController.create=false \
+    --set imageAutomationController.create=false \
+    --set imageReflectionController.create=false \
+    --wait --timeout 5m || {
+    echo "[WARN] Flux install failed; app deploy will fall back to direct Helm" >&2
+    ENABLE_GITOPS=false
+    return 0
+  }
+  echo "[INFO] Flux controllers ready"
+}
+
 # Fetch the repo source tarball at the pinned ref so the Helm chart deployed
 # on the instance is the exact chart version Terraform planned against.
 fetch_chart_source() {
@@ -395,6 +421,125 @@ fetch_chart_source() {
     sleep $((attempt * 2))
   done
   echo "[ERROR] Failed to fetch chart source after retries" >&2
+  return 1
+}
+
+# Direct push-time install. Relies on bash dynamic scoping for image_repo /
+# image_tag set in deploy_hello_world.
+deploy_with_helm() {
+  echo "[INFO] Deploying hello-world via Helm (image ${APP_IMAGE}, nodePort ${HELLO_NODE_PORT}, tls=${ENABLE_TLS})"
+  if helm upgrade --install hello-world "${CHART_DIR}" \
+    --namespace hello-world --create-namespace \
+    --set image.repository="${image_repo}" \
+    --set image.tag="${image_tag}" \
+    --set service.nodePort="${HELLO_NODE_PORT}" \
+    -f /tmp/tls-values.yaml \
+    --wait --timeout 5m; then
+    echo "[INFO] hello-world deployed"
+    return 0
+  fi
+  # Covers ImagePullBackOff (e.g. GHCR unreachable) and probe failures:
+  # redeploy with a public fallback image that serves the same greeting.
+  echo "[WARN] Deploy with ${APP_IMAGE} failed; falling back to hashicorp/http-echo" >&2
+  cat > /tmp/fallback-values.yaml <<'VALUES'
+image:
+  repository: hashicorp/http-echo
+  tag: "0.2.3"
+args: ["-text=Hello, World! (fallback image)"]
+probes:
+  path: /
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+VALUES
+  helm upgrade --install hello-world "${CHART_DIR}" \
+    --namespace hello-world --create-namespace \
+    -f /tmp/fallback-values.yaml \
+    -f /tmp/tls-values.yaml \
+    --set service.nodePort="${HELLO_NODE_PORT}" \
+    --wait --timeout 3m || {
+    echo "[ERROR] Fallback deployment also failed" >&2
+    return 1
+  }
+  echo "[INFO] Fallback hello-world deployed"
+}
+
+# GitOps path: Flux reconciles the chart from the git repo itself. Uses
+# dynamic scoping for image_repo / image_tag from deploy_hello_world.
+deploy_with_flux() {
+  if [ -z "${GITOPS_REPO_URL}" ]; then
+    echo "[WARN] GITOPS_REPO_URL not set" >&2
+    return 1
+  fi
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  # Pin to a commit when the ref is a full SHA (ephemeral reproducibility);
+  # track the branch otherwise (continuous drift-corrected reconciliation).
+  local ref_line
+  if [[ "${GITOPS_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+    ref_line="commit: ${GITOPS_REF}"
+  else
+    ref_line="branch: ${GITOPS_REF}"
+  fi
+  local tls_values=""
+  if [ "${ENABLE_TLS}" = "true" ] && [ -s /tmp/tls-values.yaml ]; then
+    tls_values=$(sed 's/^/    /' /tmp/tls-values.yaml)
+  fi
+  echo "[INFO] Applying Flux GitRepository + HelmRelease (ref: ${ref_line})"
+  cat <<FLUX | k3s kubectl apply -f -
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: app-repo
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: ${GITOPS_REPO_URL}
+  ref:
+    ${ref_line}
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: hello-world
+  namespace: flux-system
+spec:
+  interval: 1m
+  releaseName: hello-world
+  targetNamespace: hello-world
+  install:
+    createNamespace: true
+  chart:
+    spec:
+      chart: charts/hello-world
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: app-repo
+  values:
+    image:
+      repository: ${image_repo}
+      tag: "${image_tag}"
+    service:
+      nodePort: ${HELLO_NODE_PORT}
+${tls_values}
+FLUX
+  echo "[INFO] Waiting for Flux to reconcile the release..."
+  local waited=0 timeout=300
+  while [ $waited -lt $timeout ]; do
+    if k3s kubectl -n hello-world rollout status deploy/hello-world --timeout=10s >/dev/null 2>&1; then
+      echo "[INFO] HelmRelease reconciled; deployment ready"
+      return 0
+    fi
+    if (( waited % 60 == 0 )) && [ $waited -gt 0 ]; then
+      k3s kubectl -n flux-system get gitrepository,helmrelease 2>/dev/null || true
+    fi
+    sleep 10; waited=$((waited+10))
+  done
+  echo "[WARN] Flux did not reconcile within ${timeout}s" >&2
+  k3s kubectl -n flux-system describe helmrelease hello-world 2>/dev/null | tail -20 || true
   return 1
 }
 
@@ -429,43 +574,15 @@ ingress:
 TLSVALUES
     echo "[INFO] TLS enabled for https://${tls_host}/"
   fi
-  echo "[INFO] Deploying hello-world via Helm (image ${APP_IMAGE}, nodePort ${HELLO_NODE_PORT}, tls=${ENABLE_TLS})"
-  if helm upgrade --install hello-world "${CHART_DIR}" \
-    --namespace hello-world --create-namespace \
-    --set image.repository="${image_repo}" \
-    --set image.tag="${image_tag}" \
-    --set service.nodePort="${HELLO_NODE_PORT}" \
-    -f /tmp/tls-values.yaml \
-    --wait --timeout 5m; then
-    echo "[INFO] hello-world deployed"
+  if [ "${ENABLE_GITOPS}" = "true" ]; then
+    if deploy_with_flux; then
+      echo "[INFO] hello-world reconciled by Flux"
+    else
+      echo "[WARN] GitOps reconciliation failed; falling back to direct Helm install" >&2
+      deploy_with_helm || return 1
+    fi
   else
-    # Covers ImagePullBackOff (e.g. GHCR unreachable) and probe failures:
-    # redeploy with a public fallback image that serves the same greeting.
-    echo "[WARN] Deploy with ${APP_IMAGE} failed; falling back to hashicorp/http-echo" >&2
-    cat > /tmp/fallback-values.yaml <<'VALUES'
-image:
-  repository: hashicorp/http-echo
-  tag: "0.2.3"
-args: ["-text=Hello, World! (fallback image)"]
-probes:
-  path: /
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 100
-  runAsGroup: 1000
-  seccompProfile:
-    type: RuntimeDefault
-VALUES
-    helm upgrade --install hello-world "${CHART_DIR}" \
-      --namespace hello-world --create-namespace \
-      -f /tmp/fallback-values.yaml \
-      -f /tmp/tls-values.yaml \
-      --set service.nodePort="${HELLO_NODE_PORT}" \
-      --wait --timeout 3m || {
-      echo "[ERROR] Fallback deployment also failed" >&2
-      return 1
-    }
-    echo "[INFO] Fallback hello-world deployed"
+    deploy_with_helm || return 1
   fi
 
   echo "[INFO] Service endpoints (once Ready):"
@@ -577,6 +694,7 @@ main() {
   setup_helm_repos
   install_ingress
   install_cert_manager
+  install_flux
   fetch_chart_source
   deploy_hello_world
   wait_for_hello_world_ingress || true

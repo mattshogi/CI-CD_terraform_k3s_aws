@@ -32,6 +32,9 @@ locals {
     ENABLE_MONITORING      = var.enable_monitoring ? "true" : "false"
     ENABLE_INGRESS_NGINX   = var.enable_ingress_nginx ? "true" : "false"
     ENABLE_TLS             = var.enable_tls ? "true" : "false"
+    ENABLE_GITOPS          = var.enable_gitops ? "true" : "false"
+    GITOPS_REPO_URL        = "https://github.com/${var.github_repository}"
+    GITOPS_REF             = var.repo_ref
     APP_IMAGE              = var.app_image
     HELLO_NODE_PORT        = tostring(var.hello_node_port)
     INSTALL_SCRIPT_URL     = local.install_script_url
