@@ -29,6 +29,10 @@ on:
         description: cert-manager TLS at <ip>.sslip.io (self-signed issuer)
         type: boolean
         default: true
+      use_baked_ami:
+        description: Use latest Packer-baked k3s-node AMI (run Bake k3s AMI first)
+        type: boolean
+        default: false
       keep_after_validate:
         description: Keep resources for debugging (destroy manually later; state stays in S3)
         type: boolean
@@ -62,6 +66,7 @@ jobs:
       TF_VAR_instance_type: ${{ inputs.instance_type }}
       TF_VAR_enable_monitoring: ${{ inputs.enable_monitoring }}
       TF_VAR_enable_tls: ${{ inputs.enable_tls }}
+      TF_VAR_use_baked_ami: ${{ inputs.use_baked_ami }}
       TF_VAR_repo_ref: ${{ github.sha }}
       TF_VAR_resource_name_suffix: ${{ github.run_id }}
     steps:

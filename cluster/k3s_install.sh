@@ -114,7 +114,14 @@ install_k3s() {
     if [ "${ENABLE_INGRESS_NGINX}" = "true" ]; then
       extra_exec="--disable traefik"
     fi
-    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$extra_exec" sh -s - server
+    # On Packer-baked AMIs the binary and airgap images are pre-installed;
+    # the installer then only generates the service unit with our flags.
+    local skip_download="false"
+    if command -v k3s >/dev/null 2>&1; then
+      echo "[INFO] Baked k3s binary detected ($(k3s --version | head -1)); skipping download"
+      skip_download="true"
+    fi
+    curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD="$skip_download" INSTALL_K3S_EXEC="$extra_exec" sh -s - server
   else
     echo "[INFO] Installing k3s agent..."
     if [ -z "${SERVER_IP:-}" ] || [ -z "${K3S_TOKEN:-}" ]; then

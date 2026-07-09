@@ -139,6 +139,21 @@ jobs:
           tflint --init
           tflint --recursive -f compact
 
+  packer:
+    name: Packer — init & validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-packer@v3
+
+      - name: Packer init & validate
+        working-directory: packer
+        run: |
+          packer init .
+          packer validate .
+
   helm:
     name: Helm — lint & render
     runs-on: ubuntu-latest

@@ -55,6 +55,17 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# Packer-baked node image (see packer/ and the bake-ami workflow)
+data "aws_ami" "baked" {
+  count       = var.use_baked_ami ? 1 : 0
+  most_recent = true
+  owners      = ["self"]
+  filter {
+    name   = "name"
+    values = ["k3s-node-*"]
+  }
+}
+
 #
 # Network: create a VPC unless reusing an existing one
 #
@@ -154,10 +165,11 @@ resource "aws_ssm_parameter" "grafana_admin_password" {
 module "k3s_server" {
   source = "./modules/k3s-node"
 
-  name          = local.name
-  vpc_id        = local.vpc_id
-  subnet_id     = local.subnet_id
-  ami_id        = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
+  name      = local.name
+  vpc_id    = local.vpc_id
+  subnet_id = local.subnet_id
+  # Precedence: explicit override > baked AMI > stock Ubuntu
+  ami_id        = var.ami_id != "" ? var.ami_id : (var.use_baked_ami ? data.aws_ami.baked[0].id : data.aws_ami.ubuntu.id)
   instance_type = var.instance_type
   key_name      = var.ssh_key_name
 
