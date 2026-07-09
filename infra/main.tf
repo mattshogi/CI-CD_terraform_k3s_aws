@@ -51,9 +51,16 @@ variable "enable_ingress_nginx" {
 }
 
 variable "app_image" {
-  description = "Container image (repository:tag) for Hello World deployment"
+  description = "Container image (repository:tag) for the hello-world deployment. Defaults to the artifact built by this repo's CI; the bootstrap falls back to hashicorp/http-echo if the image cannot be pulled."
   type        = string
-  default     = "hashicorp/http-echo:0.2.3"
+  default     = "ghcr.io/mattshogi/ci-cd_terraform_k3s_aws/hello-world:latest"
+}
+
+variable "grafana_admin_password" {
+  description = "Grafana admin password when monitoring is enabled. Leave empty to have the instance generate a random one (retrievable from the in-cluster Grafana secret)."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 variable "hello_node_port" {
@@ -74,10 +81,16 @@ variable "enable_ssm" {
   default     = true
 }
 
-variable "install_script_url" {
-  description = "URL to fetch k3s_install.sh (keeps user_data small to avoid 16KB limit)."
+variable "github_repository" {
+  description = "GitHub owner/repo this deployment fetches its installer and Helm chart from."
   type        = string
-  default     = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
+  default     = "mattshogi/CI-CD_terraform_k3s_aws"
+}
+
+variable "repo_ref" {
+  description = "Git ref (commit SHA, tag, or branch) the instance fetches the installer and chart at. CI passes the exact commit SHA being deployed so boot-time behavior is pinned to the planned revision instead of floating on main."
+  type        = string
+  default     = "main"
 }
 
 variable "resource_name_suffix" {
@@ -91,6 +104,13 @@ locals {
   sg_name          = var.resource_name_suffix != "" ? "${local.sg_base}-${var.resource_name_suffix}" : local.sg_base
   iam_role_name    = var.resource_name_suffix != "" ? "k3s-ssm-role-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-role-${var.environment}"
   iam_profile_name = var.resource_name_suffix != "" ? "k3s-ssm-profile-${var.environment}-${var.resource_name_suffix}" : "k3s-ssm-profile-${var.environment}"
+
+  # Installer and chart source pinned to a specific git ref; the checksum is
+  # computed from the working tree at plan time and verified on the instance.
+  install_script_path   = "${path.module}/../cluster/k3s_install.sh"
+  install_script_url    = "https://raw.githubusercontent.com/${var.github_repository}/${var.repo_ref}/cluster/k3s_install.sh"
+  install_script_sha256 = filesha256(local.install_script_path)
+  repo_tarball_url      = "https://github.com/${var.github_repository}/archive/${var.repo_ref}.tar.gz"
 }
 
 data "aws_ami" "ubuntu" {
@@ -232,15 +252,18 @@ resource "aws_instance" "k3s_server" {
   # Ensure IAM role & instance profile have propagated (time_sleep resource) before launching instance
   depends_on = [time_sleep.iam_propagation_delay]
   user_data = templatefile("${path.module}/../cluster/user_data.tpl", {
-    NODE_INDEX           = 0
-    SERVER_IP            = ""
-    K3S_TOKEN            = ""
-    ENABLE_MONITORING    = var.enable_monitoring ? "true" : "false"
-    ENABLE_INGRESS_NGINX = var.enable_ingress_nginx ? "true" : "false"
-    APP_IMAGE            = var.app_image
-    HELLO_NODE_PORT      = tostring(var.hello_node_port)
-    INSTALL_SCRIPT_URL   = var.install_script_url
-    INSTALL_DOCKER       = var.install_docker ? "true" : "false"
+    NODE_INDEX             = 0
+    SERVER_IP              = ""
+    K3S_TOKEN              = ""
+    ENABLE_MONITORING      = var.enable_monitoring ? "true" : "false"
+    ENABLE_INGRESS_NGINX   = var.enable_ingress_nginx ? "true" : "false"
+    APP_IMAGE              = var.app_image
+    HELLO_NODE_PORT        = tostring(var.hello_node_port)
+    INSTALL_SCRIPT_URL     = local.install_script_url
+    INSTALL_SCRIPT_SHA256  = local.install_script_sha256
+    REPO_TARBALL_URL       = local.repo_tarball_url
+    INSTALL_DOCKER         = var.install_docker ? "true" : "false"
+    GRAFANA_ADMIN_PASSWORD = var.grafana_admin_password
   })
   key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
   tags = {

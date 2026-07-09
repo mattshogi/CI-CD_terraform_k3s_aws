@@ -150,15 +150,18 @@ resource "aws_instance" "k3s_server2" {
   associate_public_ip_address = true
   # Use the same templated user_data approach as the primary module
   user_data = templatefile("${path.module}/../../cluster/user_data.tpl", {
-    NODE_INDEX           = 0
-    SERVER_IP            = ""
-    K3S_TOKEN            = ""
-    ENABLE_MONITORING    = "true"
-    ENABLE_INGRESS_NGINX = "false"
-    APP_IMAGE            = "hashicorp/http-echo:0.2.3"
-    HELLO_NODE_PORT      = "30080"
-    INSTALL_SCRIPT_URL   = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
-    INSTALL_DOCKER       = var.install_docker ? "true" : "false"
+    NODE_INDEX             = 0
+    SERVER_IP              = ""
+    K3S_TOKEN              = ""
+    ENABLE_MONITORING      = "true"
+    ENABLE_INGRESS_NGINX   = "false"
+    APP_IMAGE              = "ghcr.io/mattshogi/ci-cd_terraform_k3s_aws/hello-world:latest"
+    HELLO_NODE_PORT        = "30080"
+    INSTALL_SCRIPT_URL     = "https://raw.githubusercontent.com/mattshogi/CI-CD_terraform_k3s_aws/main/cluster/k3s_install.sh"
+    INSTALL_SCRIPT_SHA256  = filesha256("${path.module}/../../cluster/k3s_install.sh")
+    REPO_TARBALL_URL       = "https://github.com/mattshogi/CI-CD_terraform_k3s_aws/archive/main.tar.gz"
+    INSTALL_DOCKER         = var.install_docker ? "true" : "false"
+    GRAFANA_ADMIN_PASSWORD = ""
   })
   key_name = var.ssh_key_name
   tags = {
