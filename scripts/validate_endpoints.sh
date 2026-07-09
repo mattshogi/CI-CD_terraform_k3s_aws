@@ -64,19 +64,21 @@ fi
 
 echo "[INFO] Hello World reachable (ingress_first_seen=${ingress_first_seen:-none} nodeport_first_seen=${nodeport_first_seen:-none})"
 
-# Optional monitoring endpoints
-echo "[INFO] Testing Prometheus (NodePort 30900 or cluster default 9090)..."
-if curl -fsSL --max-time 5 "http://$SERVER_IP:9090/-/healthy" >/dev/null 2>&1 || curl -fsSL --max-time 5 "http://$SERVER_IP:30900/-/healthy" >/dev/null 2>&1; then
+# Optional monitoring endpoints — NodePorts are only open to admin_cidr, so
+# these succeed only when run from an allowed IP (e.g. the CI runner that
+# deployed with its own IP as admin_cidr).
+echo "[INFO] Testing Prometheus (NodePort 30900)..."
+if curl -fsSL --max-time 5 "http://$SERVER_IP:30900/-/healthy" >/dev/null 2>&1; then
   echo "[SUCCESS] Prometheus is reachable"
 else
-  echo "[WARN] Prometheus not reachable (may be disabled or still starting)"
+  echo "[WARN] Prometheus not reachable (disabled, still starting, or this IP is not in admin_cidr)"
 fi
 
-echo "[INFO] Testing Grafana (NodePort 30030 or default 3000)..."
-if curl -fsSL --max-time 5 "http://$SERVER_IP:3000/api/health" >/dev/null 2>&1 || curl -fsSL --max-time 5 "http://$SERVER_IP:30030/api/health" >/dev/null 2>&1; then
+echo "[INFO] Testing Grafana (NodePort 30030)..."
+if curl -fsSL --max-time 5 "http://$SERVER_IP:30030/api/health" >/dev/null 2>&1; then
   echo "[SUCCESS] Grafana is reachable"
 else
-  echo "[WARN] Grafana not reachable (may be disabled or still starting)"
+  echo "[WARN] Grafana not reachable (disabled, still starting, or this IP is not in admin_cidr)"
 fi
 
 echo "[INFO] Endpoint validation completed"
