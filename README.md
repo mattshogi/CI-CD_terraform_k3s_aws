@@ -152,6 +152,10 @@ than hunting orphaned resources in the console.
 
 - `t3.micro` suffices for cluster + app; use `t3.small`+ with monitoring
   (kube-prometheus-stack needs the memory).
+- Stacking **all** flags (monitoring + TLS + GitOps) exceeds t3.small's 2GB —
+  the node passes validation but degrades under memory pressure minutes
+  later (observed: kube-apiserver TLS handshake timeouts, pod evictions).
+  Use `t3.medium` for the full stack.
 - Single node, no NAT gateway, no load balancer — a few cents per
   ephemeral run.
 - Ephemeral runs self-destroy; for anything kept, `terraform destroy` when done.
@@ -164,7 +168,8 @@ than hunting orphaned resources in the console.
 | `kubectl` from your machine fails | Is your IP in `admin_cidr`? Port 6443 is closed otherwise |
 | CI deploy fails fast | `TF_STATE_BUCKET` / `AWS_ROLE_ARN` repo variables set? |
 | Image pull fails on instance | Bootstrap falls back to `hashicorp/http-echo` automatically; check GHCR package visibility is public |
-| Monitoring pods pending / OOM | Use `t3.small` or larger |
+| Monitoring pods pending / OOM | Use `t3.small` or larger; `t3.medium` when monitoring + TLS + GitOps are all enabled |
+| Node healthy at first, API timeouts later | Memory exhaustion — see cost notes; check `free -m` via SSM and use a bigger instance |
 
 ## Development
 
