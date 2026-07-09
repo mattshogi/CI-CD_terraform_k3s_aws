@@ -80,10 +80,10 @@ build {
     inline = [
       "set -euo pipefail",
 
-      "echo '[BAKE] System packages'",
-      "sudo apt-get update -y",
-      "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq zstd",
-
+      # No apt packages needed at bake time: curl/tar ship with the base
+      # image, jq is installed by the boot-time bootstrap, and the airgap
+      # tarball is consumed by k3s directly. Skipping apt removes its
+      # mirror-flakiness from the bake entirely.
       "echo '[BAKE] Helm'",
       "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash",
 

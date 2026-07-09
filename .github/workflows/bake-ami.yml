@@ -66,7 +66,9 @@ jobs:
 
       - name: Packer build
         working-directory: packer
-        run: packer build -color=false -var "instance_type=${INSTANCE_TYPE}" . | tee packer-build.log
+        run: |
+          set -o pipefail # tee must not mask packer's exit code
+          packer build -color=false -var "instance_type=${INSTANCE_TYPE}" . | tee packer-build.log
         env:
           INSTANCE_TYPE: ${{ inputs.instance_type }}
 
@@ -74,7 +76,8 @@ jobs:
         if: always()
         working-directory: packer
         run: |
-          ami=$(grep -oE 'ami-[0-9a-f]{17}' packer-build.log | tail -1 || true)
+          # Only the artifact section, not e.g. the source AMI mentions
+          ami=$(grep -A2 'AMIs were created' packer-build.log | grep -oE 'ami-[0-9a-f]{17}' | tail -1 || true)
           {
             echo "## AMI bake"
             echo ""
