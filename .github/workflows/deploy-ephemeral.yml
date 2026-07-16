@@ -37,6 +37,10 @@ on:
         description: Deploy app via Flux HelmRelease instead of push-time helm install
         type: boolean
         default: false
+      ha_mode:
+        description: High availability (3 k3s servers / 3 AZs / NLB — ~3× instance cost + NLB; runs a chaos test)
+        type: boolean
+        default: false
       keep_after_validate:
         description: Keep resources for debugging (destroy manually later; state stays in S3)
         type: boolean
@@ -72,6 +76,7 @@ jobs:
       TF_VAR_enable_tls: ${{ inputs.enable_tls }}
       TF_VAR_use_baked_ami: ${{ inputs.use_baked_ami }}
       TF_VAR_enable_gitops: ${{ inputs.enable_gitops }}
+      TF_VAR_ha_mode: ${{ inputs.ha_mode }}
       TF_VAR_repo_ref: ${{ github.sha }}
       TF_VAR_resource_name_suffix: ${{ github.run_id }}
     steps:
@@ -169,13 +174,40 @@ jobs:
         run: |
           echo "server_ip=$(terraform output -raw server_public_ip)" >> "$GITHUB_OUTPUT"
           echo "instance_id=$(terraform output -raw server_instance_id)" >> "$GITHUB_OUTPUT"
+          # Stable host to validate: NLB DNS in HA mode, else the instance IP.
+          # Fall back to server_public_ip if endpoint_host is not (yet) defined.
+          endpoint_host="$(terraform output -raw endpoint_host 2>/dev/null || true)"
+          [ -n "$endpoint_host" ] || endpoint_host="$(terraform output -raw server_public_ip)"
+          echo "endpoint_host=$endpoint_host" >> "$GITHUB_OUTPUT"
+          # All server instance ids (HA: 3; single-node: 1) for the chaos step
+          echo "instance_ids=$(terraform output -json server_instance_ids 2>/dev/null || echo '[]')" >> "$GITHUB_OUTPUT"
 
       - name: Validate endpoints
         id: validate
-        if: steps.tf_out.outputs.server_ip != ''
+        if: steps.tf_out.outputs.endpoint_host != ''
         run: |
           chmod +x scripts/validate_endpoints.sh
-          scripts/validate_endpoints.sh "${{ steps.tf_out.outputs.server_ip }}" 45 10
+          scripts/validate_endpoints.sh "${{ steps.tf_out.outputs.endpoint_host }}" 45 10
+
+      - name: "Chaos: terminate one node, verify continued service"
+        id: chaos
+        if: inputs.ha_mode == true && steps.validate.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # Terminate the LAST server (node 0 runs the deployment tooling, so we
+          # spare it) and prove the NLB keeps serving through the remaining quorum.
+          victim=$(echo '${{ steps.tf_out.outputs.instance_ids }}' | jq -r '.[-1]')
+          if [ -z "$victim" ] || [ "$victim" = "null" ]; then
+            echo "::error::Could not resolve an instance id to terminate from server_instance_ids"
+            exit 1
+          fi
+          echo "[CHAOS] Terminating $victim and re-validating https://${{ steps.tf_out.outputs.endpoint_host }}/"
+          aws ec2 terminate-instances --instance-ids "$victim" >/dev/null
+          # Give the NLB time to fail the target's health check and drain it.
+          sleep 90
+          chmod +x scripts/validate_endpoints.sh
+          # Reduced retries: service should already be up on the survivors.
+          scripts/validate_endpoints.sh "${{ steps.tf_out.outputs.endpoint_host }}" 12 10
 
       - name: SSM diagnostics (on validation failure)
         if: failure() && steps.tf_out.outputs.instance_id != ''
@@ -200,10 +232,13 @@ jobs:
             echo "| --- | --- |"
             echo "| Image | \`${{ steps.resolve.outputs.app_image }}\` |"
             echo "| Server IP | \`${{ steps.tf_out.outputs.server_ip || 'n/a' }}\` |"
+            echo "| Endpoint host | \`${{ steps.tf_out.outputs.endpoint_host || 'n/a' }}\` |"
+            echo "| HA mode | ${{ inputs.ha_mode }} |"
             echo "| Instance | \`${{ steps.tf_out.outputs.instance_id || 'n/a' }}\` |"
             echo "| State key | \`ephemeral/${{ github.run_id }}.tfstate\` |"
             echo "| Apply | ${{ steps.apply.outputs.outcome || 'skipped' }} |"
             echo "| Validation | ${{ steps.validate.outcome }} |"
+            echo "| Chaos test | ${{ steps.chaos.outcome }} |"
             echo "| Destroyed | ${{ !inputs.keep_after_validate }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 

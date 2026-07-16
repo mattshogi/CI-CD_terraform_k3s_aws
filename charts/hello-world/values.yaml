@@ -34,6 +34,20 @@ probes:
   # The Go app exposes /healthz; override to "/" for images without it.
   path: /healthz
 
+# Spread replicas across nodes (HA mode sets replicaCount>1 across 3 servers).
+# whenUnsatisfiable=ScheduleAnyway keeps it soft so single-node clusters still
+# schedule every replica instead of leaving pods Pending.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+
+# PodDisruptionBudget is rendered only when replicaCount > 1 (see templates/pdb.yaml).
+# minAvailable keeps at least this many pods up during voluntary disruptions.
+pdb:
+  minAvailable: 1
+
 resources:
   requests:
     cpu: 5m
