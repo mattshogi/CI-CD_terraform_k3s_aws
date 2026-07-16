@@ -92,6 +92,15 @@ resource "aws_iam_role_policy" "deploy_permissions" {
         Resource = "*"
       },
       {
+        # NLB + target groups for ha_mode. Service-wide like ec2:* above:
+        # ELBv2 Describe* calls are not resource-scopable, and the account
+        # is a single-purpose sandbox.
+        Sid      = "LoadBalancing"
+        Effect   = "Allow"
+        Action   = ["elasticloadbalancing:*"]
+        Resource = "*"
+      },
+      {
         Sid    = "ScopedIamForInstanceRole"
         Effect = "Allow"
         Action = [
