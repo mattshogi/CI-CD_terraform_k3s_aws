@@ -192,22 +192,27 @@ jobs:
       - name: "Chaos: terminate one node, verify continued service"
         id: chaos
         if: inputs.ha_mode == true && steps.validate.outcome == 'success'
+        # Values flow through env (not inline interpolation) per this
+        # workflow's injection-safety convention.
+        env:
+          INSTANCE_IDS_JSON: ${{ steps.tf_out.outputs.instance_ids }}
+          ENDPOINT_HOST: ${{ steps.tf_out.outputs.endpoint_host }}
         run: |
           set -euo pipefail
           # Terminate the LAST server (node 0 runs the deployment tooling, so we
           # spare it) and prove the NLB keeps serving through the remaining quorum.
-          victim=$(echo '${{ steps.tf_out.outputs.instance_ids }}' | jq -r '.[-1]')
+          victim=$(printf '%s' "$INSTANCE_IDS_JSON" | jq -r '.[-1]')
           if [ -z "$victim" ] || [ "$victim" = "null" ]; then
             echo "::error::Could not resolve an instance id to terminate from server_instance_ids"
             exit 1
           fi
-          echo "[CHAOS] Terminating $victim and re-validating https://${{ steps.tf_out.outputs.endpoint_host }}/"
+          echo "[CHAOS] Terminating $victim and re-validating https://${ENDPOINT_HOST}/"
           aws ec2 terminate-instances --instance-ids "$victim" >/dev/null
           # Give the NLB time to fail the target's health check and drain it.
           sleep 90
           chmod +x scripts/validate_endpoints.sh
           # Reduced retries: service should already be up on the survivors.
-          scripts/validate_endpoints.sh "${{ steps.tf_out.outputs.endpoint_host }}" 12 10
+          scripts/validate_endpoints.sh "$ENDPOINT_HOST" 12 10
 
       - name: SSM diagnostics (on validation failure)
         if: failure() && steps.tf_out.outputs.instance_id != ''
