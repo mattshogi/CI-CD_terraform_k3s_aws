@@ -23,6 +23,10 @@ HELLO_NODE_PORT=${HELLO_NODE_PORT:-30080}
 INSTALL_DOCKER=${INSTALL_DOCKER:-false}
 REPO_TARBALL_URL=${REPO_TARBALL_URL:-}
 GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}
+HA_MODE=${HA_MODE:-false}
+CLUSTER_INIT=${CLUSTER_INIT:-false}
+SERVER_JOIN_URL=${SERVER_JOIN_URL:-}
+TLS_HOST=${TLS_HOST:-}
 CHART_DIR=/opt/repo-src/charts/hello-world
 
 # Idempotency guard
@@ -110,30 +114,84 @@ install_helm() {
 
 install_k3s() {
   echo "[INFO] Installing k3s (early)";
-  if [ "${NODE_INDEX:-0}" = "0" ]; then
-    echo "[INFO] Installing k3s server..."
-    # kubeconfig stays root-only (default 600); everything here runs as root
-    local extra_exec=""
-    if [ "${ENABLE_INGRESS_NGINX}" = "true" ]; then
-      extra_exec="--disable traefik"
+  # kubeconfig stays root-only (default 600); everything here runs as root
+
+  # Traefik-disable applies to every SERVER branch (HA primary, HA joining,
+  # single server); nginx ingress replaces it when ENABLE_INGRESS_NGINX=true.
+  local extra_exec=""
+  if [ "${ENABLE_INGRESS_NGINX}" = "true" ]; then
+    extra_exec="--disable traefik"
+  fi
+  # On Packer-baked AMIs the binary and airgap images are pre-installed; the
+  # installer then only generates the service unit with our flags. This
+  # detection must apply to every branch below.
+  local skip_download="false"
+  if command -v k3s >/dev/null 2>&1; then
+    echo "[INFO] Baked k3s binary detected ($(k3s --version | head -1)); skipping download"
+    skip_download="true"
+  fi
+
+  # is_server: this node runs the k3s API locally (all branches except legacy
+  # agent) → gets the wait-for-API loop afterwards.
+  # is_joining_server: additionally waits until it registers Ready in the etcd
+  # cluster before deployment work proceeds elsewhere.
+  local is_server="true"
+  local is_joining_server="false"
+
+  if [ "${CLUSTER_INIT}" = "true" ]; then
+    # (a) HA primary — initialise the embedded-etcd cluster. K3S_TOKEN is
+    # exported so the cluster join token is fixed and joining servers can
+    # authenticate against a known value.
+    echo "[INFO] Installing k3s as HA primary server (--cluster-init)..."
+    if [ -z "${K3S_TOKEN:-}" ]; then
+      echo "[ERROR] K3S_TOKEN required for HA --cluster-init; refusing to start with an unset token" >&2
+      exit 1
     fi
-    # On Packer-baked AMIs the binary and airgap images are pre-installed;
-    # the installer then only generates the service unit with our flags.
-    local skip_download="false"
-    if command -v k3s >/dev/null 2>&1; then
-      echo "[INFO] Baked k3s binary detected ($(k3s --version | head -1)); skipping download"
-      skip_download="true"
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_SKIP_DOWNLOAD="$skip_download" \
+      K3S_TOKEN="$K3S_TOKEN" \
+      INSTALL_K3S_EXEC="--cluster-init $extra_exec" sh -s - server
+  elif [ -n "${SERVER_JOIN_URL:-}" ]; then
+    # (b) HA joining server — wait for the primary API to answer, then join
+    # the etcd cluster as an additional control-plane node.
+    echo "[INFO] Installing k3s as HA joining server (--server ${SERVER_JOIN_URL})..."
+    if [ -z "${K3S_TOKEN:-}" ]; then
+      echo "[ERROR] K3S_TOKEN required to join HA cluster; refusing to start with an unset token" >&2
+      exit 1
     fi
-    curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD="$skip_download" INSTALL_K3S_EXEC="$extra_exec" sh -s - server
-  else
+    # k3s answers /ping unauthenticated once its API is up; poll ~10 minutes.
+    echo "[INFO] Waiting for HA primary API at ${SERVER_JOIN_URL}/ping..."
+    local join_wait=0 join_timeout=600
+    until curl -sk --max-time 5 "${SERVER_JOIN_URL}/ping" >/dev/null 2>&1; do
+      if [ "$join_wait" -ge "$join_timeout" ]; then
+        echo "[ERROR] HA primary at ${SERVER_JOIN_URL} never answered /ping after ${join_timeout}s; aborting join" >&2
+        exit 1
+      fi
+      echo "[INFO] Waiting for HA primary API... ($join_wait/$join_timeout)"
+      sleep 10; join_wait=$((join_wait+10))
+    done
+    echo "[INFO] HA primary API answered; joining the cluster"
+    is_joining_server="true"
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_SKIP_DOWNLOAD="$skip_download" \
+      K3S_TOKEN="$K3S_TOKEN" \
+      INSTALL_K3S_EXEC="--server ${SERVER_JOIN_URL} $extra_exec" sh -s - server
+  elif [ "${HA_MODE}" != "true" ] && [ "${NODE_INDEX:-0}" != "0" ]; then
+    # (c) Legacy agent path — kept exactly as before.
     echo "[INFO] Installing k3s agent..."
+    is_server="false"
     if [ -z "${SERVER_IP:-}" ] || [ -z "${K3S_TOKEN:-}" ]; then
       echo "[ERROR] SERVER_IP and K3S_TOKEN required for agent installation"
       exit 1
     fi
     curl -sfL https://get.k3s.io | K3S_URL="https://${SERVER_IP}:6443" K3S_TOKEN="$K3S_TOKEN" sh -
+  else
+    # (d) Single server — today's default behaviour (byte-for-byte).
+    echo "[INFO] Installing k3s server..."
+    curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD="$skip_download" INSTALL_K3S_EXEC="$extra_exec" sh -s - server
   fi
-  if [ "${NODE_INDEX:-0}" = "0" ]; then
+
+  if [ "$is_server" = "true" ]; then
     echo "[INFO] Waiting for k3s API server to be ready..."
     local max_wait=300
     local wait_time=0
@@ -147,6 +205,30 @@ install_k3s() {
       wait_time=$((wait_time + 10))
     done
     echo "[INFO] k3s API server is ready"
+
+    if [ "$is_joining_server" = "true" ]; then
+      # Wait until this node registers Ready in the cluster before finalize.
+      local this_host
+      this_host=$(imds_get local-hostname)
+      if [ -z "$this_host" ] || [ "$this_host" = "<unknown>" ]; then
+        this_host=$(hostname)
+      fi
+      # k3s registers nodes under the short hostname.
+      this_host="${this_host%%.*}"
+      echo "[INFO] Waiting for joining server node '${this_host}' to become Ready..."
+      local node_wait=0 node_timeout=300
+      while true; do
+        if k3s kubectl get nodes "${this_host}" --no-headers 2>/dev/null | awk '$2 ~ /Ready/' | grep -q .; then
+          echo "[INFO] Joining server node '${this_host}' is Ready"
+          break
+        fi
+        if [ "$node_wait" -ge "$node_timeout" ]; then
+          echo "[WARN] Joining server node '${this_host}' not Ready after ${node_timeout}s; continuing"
+          break
+        fi
+        sleep 10; node_wait=$((node_wait+10))
+      done
+    fi
   fi
 }
 
@@ -428,11 +510,18 @@ fetch_chart_source() {
 # image_tag set in deploy_hello_world.
 deploy_with_helm() {
   echo "[INFO] Deploying hello-world via Helm (image ${APP_IMAGE}, nodePort ${HELLO_NODE_PORT}, tls=${ENABLE_TLS})"
+  # In HA mode run two replicas so the chart's topologySpreadConstraints + PDB
+  # (keyed off replicaCount>1) spread the app across nodes.
+  local replica_args=()
+  if [ "${HA_MODE}" = "true" ]; then
+    replica_args+=(--set replicaCount=2)
+  fi
   if helm upgrade --install hello-world "${CHART_DIR}" \
     --namespace hello-world --create-namespace \
     --set image.repository="${image_repo}" \
     --set image.tag="${image_tag}" \
     --set service.nodePort="${HELLO_NODE_PORT}" \
+    "${replica_args[@]}" \
     -f /tmp/tls-values.yaml \
     --wait --timeout 5m; then
     echo "[INFO] hello-world deployed"
@@ -460,6 +549,7 @@ VALUES
     -f /tmp/fallback-values.yaml \
     -f /tmp/tls-values.yaml \
     --set service.nodePort="${HELLO_NODE_PORT}" \
+    "${replica_args[@]}" \
     --wait --timeout 3m || {
     echo "[ERROR] Fallback deployment also failed" >&2
     return 1
@@ -486,6 +576,12 @@ deploy_with_flux() {
   local tls_values=""
   if [ "${ENABLE_TLS}" = "true" ] && [ -s /tmp/tls-values.yaml ]; then
     tls_values=$(sed 's/^/    /' /tmp/tls-values.yaml)
+  fi
+  # In HA mode run two replicas (chart topologySpreadConstraints + PDB key off
+  # replicaCount>1). Indented to sit under HelmRelease .spec.values.
+  local replica_values=""
+  if [ "${HA_MODE}" = "true" ]; then
+    replica_values="    replicaCount: 2"
   fi
   echo "[INFO] Applying Flux GitRepository + HelmRelease (ref: ${ref_line})"
   cat <<FLUX | k3s kubectl apply -f -
@@ -524,6 +620,7 @@ spec:
       tag: "${image_tag}"
     service:
       nodePort: ${HELLO_NODE_PORT}
+${replica_values}
 ${tls_values}
 FLUX
   echo "[INFO] Waiting for Flux to reconcile the release..."
@@ -562,8 +659,13 @@ deploy_hello_world() {
   : > /tmp/tls-values.yaml
   if [ "${ENABLE_TLS}" = "true" ]; then
     local public_ip tls_host
-    public_ip=$(imds_get public-ipv4)
-    tls_host="${public_ip}.sslip.io"
+    if [ -n "${TLS_HOST:-}" ]; then
+      # HA mode passes the NLB DNS name; use it verbatim.
+      tls_host="${TLS_HOST}"
+    else
+      public_ip=$(imds_get public-ipv4)
+      tls_host="${public_ip}.sslip.io"
+    fi
     cat > /tmp/tls-values.yaml <<TLSVALUES
 ingress:
   annotations:
@@ -625,8 +727,17 @@ finalize_installation() {
   # kubeconfig contains the cluster admin credential — keep it root-only
   chmod 600 /etc/rancher/k3s/k3s.yaml || true
   echo "Installation completed at $(date)" > /tmp/k3s-install-complete
-  if [ "${NODE_INDEX:-0}" = "0" ]; then
-    echo "[SUCCESS] k3s server installation completed!"
+  if [ -n "${SERVER_JOIN_URL:-}" ]; then
+    # HA joining server: control-plane/etcd member only — no app/monitoring
+    # deployment work happens here (that is gated to node 0).
+    echo "[SUCCESS] k3s HA server joined the cluster!"
+    echo "[INFO] This node is an additional control-plane/etcd member; application workloads are scheduled cluster-wide from the primary."
+  elif [ "${NODE_INDEX:-0}" = "0" ]; then
+    if [ "${HA_MODE}" = "true" ]; then
+      echo "[SUCCESS] k3s HA primary server installation completed!"
+    else
+      echo "[SUCCESS] k3s server installation completed!"
+    fi
     local ip
     ip=$(imds_get public-ipv4)
     echo "[INFO] Services available (once pods ready):"
