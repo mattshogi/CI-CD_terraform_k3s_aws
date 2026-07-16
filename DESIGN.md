@@ -179,11 +179,39 @@ removing its slowest steps. Opt-in (`use_baked_ami`) because stock-Ubuntu
 boots must keep working: the baked image is an optimization, not a
 dependency, and bakes only happen when someone runs the workflow.
 
+## 14. High availability as a flag: 3-server embedded etcd, NLB, chaos-verified
+
+**Choice:** `ha_mode` provisions three k3s servers across three AZs running
+k3s's embedded etcd, fronted by an L4 Network Load Balancer; a chaos step in
+the deploy workflow kills a node and re-validates on every HA dispatch.
+**Rejected:** an external RDS/managed datastore, Argo CD + ALB, and leaving HA
+always on.
+
+Three servers is the smallest embedded-etcd quorum that survives one loss:
+two nodes are strictly *worse* than one, because losing either breaks quorum
+and wedges the cluster, so HA only begins to pay off at three. k3s's embedded
+etcd keeps the datastore in-process — an external RDS/Postgres datastore adds
+a managed database's cost and lifecycle for no resilience gain at this scale.
+The load balancer is deliberately L4 (NLB), not L7 (ALB): TLS terminates once,
+at Traefik inside the cluster, so an ALB re-terminating certs would duplicate
+that machinery and defeat the self-signed/sslip.io flow (#11); the NLB just
+forwards 80/443 to healthy targets. The Kubernetes API is **not** exposed
+through the LB — additional servers join over node-0's private IP and the join
+token, and 6443 stays restricted to `admin_cidr` (#4), so the LB never widens
+the control-plane attack surface. HA is off by default because it costs ~3×
+the instances plus an always-on NLB versus the cents a single ephemeral node
+costs — and most runs prove the pipeline, not resilience. When it *is*
+requested, a claim of "highly available" is worthless untested, so the deploy
+workflow terminates one server (the last in the list; node 0 runs the deploy
+tooling) and re-validates through the NLB — the run fails if service didn't
+survive.
+
 ## Known limitations / future work
 
 - Let's Encrypt issuer + real domain for browser-trusted TLS (see #11).
-- Multi-node: instantiate `modules/k3s-node` for agents with the join token
-  via SSM Parameter Store (see #10).
+- Larger quorum (5 servers → tolerates 2 losses) and scheduled/periodic chaos
+  runs to catch resilience regressions between deploys, rather than only on an
+  explicit HA dispatch (see #14).
 - Scheduled AMI re-bakes (patch currency) and pruning of old `k3s-node-*`
   AMIs/snapshots.
 - S3 lifecycle rule to expire orphaned `ephemeral/*` state objects.

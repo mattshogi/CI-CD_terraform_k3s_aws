@@ -62,6 +62,7 @@ never in code or logs.
 | `enable_monitoring` | `false` (CI: `true`) | kube-prometheus-stack; Grafana password in SSM Parameter Store |
 | `enable_gitops` | `false` | Flux `GitRepository` + `HelmRelease` reconciles the chart from this repo instead of push-time `helm install` |
 | `use_baked_ami` | `false` | Boot from the latest Packer-baked `k3s-node-*` AMI (pre-installed k3s/images/helm) instead of stock Ubuntu |
+| `ha_mode` | `false` | 3 k3s servers across 3 AZs, embedded etcd, NLB entry point; the deploy workflow kills a node and re-validates (~3× instance cost + NLB — see [#14](DESIGN.md)) |
 | `admin_cidr` | `""` (closed) | CIDR allowed on SSH/6443/NodePorts; CI sets the runner IP |
 
 ## Repository layout
@@ -129,7 +130,7 @@ One-time bootstrap, in order:
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | `ci.yml` | push / PR | Test, lint (Go/Terraform/Helm/Packer), build+push image, Trivy (image + IaC, gates on HIGH+), gitleaks, integration tests |
-| `deploy-ephemeral.yml` | manual dispatch | Provision → validate → destroy; per-run S3 state key; deploys the CI-built image for the exact commit; TLS/GitOps/baked-AMI toggles |
+| `deploy-ephemeral.yml` | manual dispatch | Provision → validate → destroy; per-run S3 state key; deploys the CI-built image for the exact commit; TLS/GitOps/baked-AMI/HA toggles (HA adds a chaos test that terminates a node and re-validates) |
 | `bake-ami.yml` | manual dispatch | Packer-builds the pre-baked `k3s-node-*` AMI |
 | `release.yml` | `v*` tag | Multi-arch semver images + GitHub release with binaries |
 
