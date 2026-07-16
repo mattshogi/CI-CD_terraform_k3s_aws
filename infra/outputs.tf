@@ -22,3 +22,18 @@ output "grafana_password_ssm_parameter" {
   description = "SSM Parameter Store name holding the Grafana admin password (when monitoring is enabled)."
   value       = var.enable_monitoring ? aws_ssm_parameter.grafana_admin_password[0].name : null
 }
+
+output "endpoint_host" {
+  description = "Stable host to validate against: the NLB DNS name in HA mode, otherwise the primary node's public IP."
+  value       = var.ha_mode ? module.nlb[0].dns_name : module.k3s_server.public_ip
+}
+
+output "server_instance_ids" {
+  description = "Instance ids of all k3s server nodes (primary first, then any HA peers)."
+  value       = concat([module.k3s_server.instance_id], module.k3s_joiners[*].instance_id)
+}
+
+output "ha_mode" {
+  description = "Whether the cluster was deployed in high-availability mode."
+  value       = var.ha_mode
+}

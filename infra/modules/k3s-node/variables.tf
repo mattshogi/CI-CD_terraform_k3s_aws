@@ -74,3 +74,9 @@ variable "extra_tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "cluster_mode" {
+  description = "When true, open the intra-cluster ports a multi-server k3s (embedded etcd) needs — API 6443, etcd 2379-2380, flannel VXLAN UDP 8472, kubelet 10250 — as self-referencing rules (source is this node SG itself). Left false for the single-node topology, where these ports stay closed."
+  type        = bool
+  default     = false
+}
