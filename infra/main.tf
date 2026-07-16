@@ -13,8 +13,6 @@ locals {
   offered_azs = sort(data.aws_ec2_instance_type_offerings.requested.locations)
   azs         = var.ha_mode ? slice(local.offered_azs, 0, 3) : [local.offered_azs[0]]
 
-  server_count = var.ha_mode ? 3 : 1
-
   # Subnet ids: reuse an existing VPC's public subnets, or the ones the network
   # module just created (one per AZ). subnet_id keeps the first for callers that
   # only need a single subnet (single-node compatibility).
