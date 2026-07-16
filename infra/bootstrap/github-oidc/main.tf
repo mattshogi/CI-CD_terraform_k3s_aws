@@ -40,6 +40,14 @@ variable "state_bucket" {
 
 data "aws_caller_identity" "current" {}
 
+# One-time: the ELB service-linked role must exist before the FIRST load
+# balancer in an account can be created. Creating it here (with human
+# credentials) means the CI deploy role never needs
+# iam:CreateServiceLinkedRole.
+resource "aws_iam_service_linked_role" "elb" {
+  aws_service_name = "elasticloadbalancing.amazonaws.com"
+}
+
 # GitHub's OIDC identity provider. The thumbprint is not validated by AWS for
 # GitHub's provider anymore (AWS pins GitHub's root CA), but the argument is
 # still required by the API.
