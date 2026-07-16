@@ -21,8 +21,8 @@ variable "public_subnet_cidr" {
   default     = "10.0.1.0/24"
 }
 
-variable "availability_zone" {
-  description = "AZ for the public subnet. Empty lets AWS choose — but pin it to an AZ that actually offers your instance type (not all AZs carry all types; us-east-1e lacks t3.medium, for example)."
-  type        = string
-  default     = ""
+variable "availability_zones" {
+  description = "AZs to place public subnets in. Empty (default) creates a single subnet in an AWS-chosen AZ (legacy single-node behavior). A non-empty list creates one public subnet per AZ, each with a non-colliding CIDR carved with cidrsubnet(vpc_cidr, 8, index+1) — used by ha_mode to spread 3 server nodes across 3 AZs. Pin AZs to ones that actually offer your instance type (not all AZs carry all types; us-east-1e lacks t3.medium, for example)."
+  type        = list(string)
+  default     = []
 }

@@ -25,6 +25,16 @@ locals {
   } : {}
 
   ingress_rules = merge(local.public_rules, local.admin_rules, local.ssh_rules)
+
+  # Intra-cluster ports for a multi-server k3s with embedded etcd. Sourced from
+  # the node SG itself (self = true) so only peer nodes can reach them. Empty
+  # in single-node mode, which keeps the SG byte-for-byte as before.
+  cluster_rules = var.cluster_mode ? {
+    "cluster-api-6443" = { from = 6443, to = 6443, protocol = "tcp", desc = "k3s API server (intra-cluster join)" }
+    "cluster-etcd"     = { from = 2379, to = 2380, protocol = "tcp", desc = "embedded etcd client/peer" }
+    "cluster-flannel"  = { from = 8472, to = 8472, protocol = "udp", desc = "flannel VXLAN overlay" }
+    "cluster-kubelet"  = { from = 10250, to = 10250, protocol = "tcp", desc = "kubelet metrics/exec" }
+  } : {}
 }
 
 resource "aws_security_group" "node" {
@@ -40,6 +50,18 @@ resource "aws_security_group" "node" {
       to_port     = ingress.value.port
       protocol    = "tcp"
       cidr_blocks = ingress.value.cidrs
+    }
+  }
+
+  # Self-referencing intra-cluster rules (only present when cluster_mode = true).
+  dynamic "ingress" {
+    for_each = local.cluster_rules
+    content {
+      description = ingress.value.desc
+      from_port   = ingress.value.from
+      to_port     = ingress.value.to
+      protocol    = ingress.value.protocol
+      self        = true
     }
   }
 

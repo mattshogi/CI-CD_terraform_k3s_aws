@@ -5,6 +5,11 @@
 
 locals {
   name = var.name_suffix != "" ? "k3s-${var.environment}-${var.name_suffix}" : "k3s-${var.environment}"
+
+  # Empty AZ list → one subnet in an AWS-chosen AZ (legacy behavior).
+  # Non-empty → one subnet per AZ with non-colliding CIDRs (ha_mode).
+  explicit_azs = length(var.availability_zones) > 0
+  subnet_count = local.explicit_azs ? length(var.availability_zones) : 1
 }
 
 resource "aws_vpc" "main" {
@@ -22,13 +27,14 @@ resource "aws_vpc" "main" {
 # (cost). Private subnets + NAT would be the first change for a real service.
 #trivy:ignore:AVD-AWS-0164
 resource "aws_subnet" "public" {
+  count                   = local.subnet_count
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidr
-  availability_zone       = var.availability_zone != "" ? var.availability_zone : null
+  cidr_block              = local.explicit_azs ? cidrsubnet(var.vpc_cidr, 8, count.index + 1) : var.public_subnet_cidr
+  availability_zone       = local.explicit_azs ? var.availability_zones[count.index] : null
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "${local.name}-public"
+    Name = local.subnet_count > 1 ? "${local.name}-public-${count.index}" : "${local.name}-public"
   }
 }
 
@@ -55,7 +61,8 @@ resource "aws_route" "default" {
 }
 
 resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
+  count          = local.subnet_count
+  subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 

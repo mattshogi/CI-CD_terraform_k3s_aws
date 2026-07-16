@@ -6,8 +6,18 @@ locals {
   name_suffix = var.resource_name_suffix != "" ? "-${var.resource_name_suffix}" : ""
   name        = "k3s-${var.environment}${local.name_suffix}"
 
-  vpc_id    = var.vpc_id != "" ? var.vpc_id : module.network[0].vpc_id
-  subnet_id = var.vpc_id != "" ? data.aws_subnets.existing_public[0].ids[0] : module.network[0].public_subnet_id
+  vpc_id = var.vpc_id != "" ? var.vpc_id : module.network[0].vpc_id
+
+  # AZ selection from the AZs that actually offer the requested instance type.
+  # HA needs 3 (odd-sized etcd quorum); single-node pins to the first.
+  offered_azs = sort(data.aws_ec2_instance_type_offerings.requested.locations)
+  azs         = var.ha_mode ? slice(local.offered_azs, 0, 3) : [local.offered_azs[0]]
+
+  # Subnet ids: reuse an existing VPC's public subnets, or the ones the network
+  # module just created (one per AZ). subnet_id keeps the first for callers that
+  # only need a single subnet (single-node compatibility).
+  subnet_ids = var.vpc_id != "" ? data.aws_subnets.existing_public[0].ids : module.network[0].public_subnet_ids
+  subnet_id  = local.subnet_ids[0]
 
   # Installer and chart source pinned to a specific git ref; the checksum is
   # computed from the working tree at plan time and verified on the instance.
@@ -25,10 +35,19 @@ locals {
     var.enable_monitoring ? [30030, 30900] : []
   )
 
-  user_data = templatefile("${path.module}/../cluster/user_data.tpl", {
-    NODE_INDEX             = 0
+  # Join token: only meaningful in HA (peers authenticate to the primary with
+  # it). Empty in single-node mode, which keeps user_data byte-for-byte as before.
+  k3s_token = var.ha_mode ? random_password.k3s_token[0].result : ""
+
+  # Keys shared by every node's user_data. Per-node keys (NODE_INDEX,
+  # CLUSTER_INIT, SERVER_JOIN_URL, TLS_HOST) are merged in at each module call.
+  # The four HA_* keys are unused by the current single-node template; extra
+  # templatefile vars are ignored, so this stays compatible until the bootstrap
+  # teammate's template consumes them.
+  user_data_common = {
     SERVER_IP              = ""
-    K3S_TOKEN              = ""
+    K3S_TOKEN              = local.k3s_token
+    HA_MODE                = var.ha_mode ? "true" : "false"
     ENABLE_MONITORING      = var.enable_monitoring ? "true" : "false"
     ENABLE_INGRESS_NGINX   = var.enable_ingress_nginx ? "true" : "false"
     ENABLE_TLS             = var.enable_tls ? "true" : "false"
@@ -42,7 +61,7 @@ locals {
     REPO_TARBALL_URL       = local.repo_tarball_url
     INSTALL_DOCKER         = var.install_docker ? "true" : "false"
     GRAFANA_ADMIN_PASSWORD = local.grafana_admin_password
-  })
+  }
 }
 
 data "aws_ami" "ubuntu" {
@@ -88,6 +107,12 @@ data "aws_ec2_instance_type_offerings" "requested" {
       condition     = length(self.locations) > 0
       error_message = "Instance type ${var.instance_type} is not offered in any AZ of this region."
     }
+
+    # HA spreads 3 servers across 3 AZs for an odd-sized etcd quorum.
+    postcondition {
+      condition     = !var.ha_mode || length(self.locations) >= 3
+      error_message = "ha_mode requires at least 3 AZs offering ${var.instance_type} in ${var.aws_region}; only ${length(self.locations)} offer it. Choose a more widely available instance type or disable ha_mode."
+    }
   }
 }
 
@@ -95,9 +120,9 @@ module "network" {
   count  = var.vpc_id == "" ? 1 : 0
   source = "./modules/network"
 
-  environment       = var.environment
-  name_suffix       = var.resource_name_suffix
-  availability_zone = sort(data.aws_ec2_instance_type_offerings.requested.locations)[0]
+  environment        = var.environment
+  name_suffix        = var.resource_name_suffix
+  availability_zones = local.azs
 }
 
 # When reusing an existing VPC, find its public subnets (any subnet that maps
@@ -181,22 +206,98 @@ resource "aws_ssm_parameter" "grafana_admin_password" {
 }
 
 #
-# k3s server node
+# k3s cluster join token (HA only): shared secret peers use to join the primary
 #
 
+resource "random_password" "k3s_token" {
+  count   = var.ha_mode ? 1 : 0
+  length  = 40
+  special = false
+}
+
+resource "aws_ssm_parameter" "k3s_join_token" {
+  count = var.ha_mode ? 1 : 0
+  name  = "/${local.name}/k3s-join-token"
+  type  = "SecureString"
+  value = random_password.k3s_token[0].result
+}
+
+#
+# k3s server node(s)
+#
+# The primary (node 0) is a standalone module instance; the HA peers are a
+# separate counted instance. This split is what lets the peers reference the
+# primary's private IP (SERVER_JOIN_URL) — a single counted module cannot refer
+# to module.self[0] from within its own count. It also gives natural ordering:
+# the primary is created first, then peers join it.
+#
+# Precedence for the AMI: explicit override > baked AMI > stock Ubuntu.
+locals {
+  node_ami_id = var.ami_id != "" ? var.ami_id : (var.use_baked_ami ? data.aws_ami.baked[0].id : data.aws_ami.ubuntu.id)
+}
+
+# Public NLB fronting web traffic across all servers (HA only). Created before
+# the nodes: aws_lb.dns_name is known without the instances, so it can be fed
+# into node user_data (TLS_HOST). Instances are attached afterwards — see the
+# ordering note in modules/nlb.
+module "nlb" {
+  count  = var.ha_mode ? 1 : 0
+  source = "./modules/nlb"
+
+  name                = local.name
+  vpc_id              = local.vpc_id
+  subnet_ids          = local.subnet_ids
+  target_instance_ids = concat([module.k3s_server.instance_id], module.k3s_joiners[*].instance_id)
+}
+
+# Primary server (node 0). Bootstraps the cluster (CLUSTER_INIT) in HA mode.
 module "k3s_server" {
   source = "./modules/k3s-node"
 
-  name      = local.name
-  vpc_id    = local.vpc_id
-  subnet_id = local.subnet_id
-  # Precedence: explicit override > baked AMI > stock Ubuntu
-  ami_id        = var.ami_id != "" ? var.ami_id : (var.use_baked_ami ? data.aws_ami.baked[0].id : data.aws_ami.ubuntu.id)
+  name          = var.ha_mode ? "${local.name}-0" : local.name
+  vpc_id        = local.vpc_id
+  subnet_id     = element(local.subnet_ids, 0)
+  ami_id        = local.node_ami_id
   instance_type = var.instance_type
   key_name      = var.ssh_key_name
+  cluster_mode  = var.ha_mode
 
   iam_instance_profile = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : ""
-  user_data            = local.user_data
+  user_data = templatefile("${path.module}/../cluster/user_data.tpl", merge(local.user_data_common, {
+    NODE_INDEX      = 0
+    CLUSTER_INIT    = var.ha_mode ? "true" : "false"
+    SERVER_JOIN_URL = ""
+    TLS_HOST        = var.ha_mode ? module.nlb[0].dns_name : ""
+  }))
+
+  public_ports = var.enable_tls ? [80, 443] : [80]
+  admin_cidr   = var.admin_cidr
+  admin_ports  = concat([6443], local.admin_node_ports)
+
+  depends_on = [time_sleep.iam_propagation_delay]
+}
+
+# HA peers (nodes 1 and 2). Join the primary over its private IP; never do
+# CLUSTER_INIT. Only exist in HA mode.
+module "k3s_joiners" {
+  count  = var.ha_mode ? 2 : 0
+  source = "./modules/k3s-node"
+
+  name          = "${local.name}-${count.index + 1}"
+  vpc_id        = local.vpc_id
+  subnet_id     = element(local.subnet_ids, count.index + 1)
+  ami_id        = local.node_ami_id
+  instance_type = var.instance_type
+  key_name      = var.ssh_key_name
+  cluster_mode  = var.ha_mode
+
+  iam_instance_profile = var.enable_ssm ? aws_iam_instance_profile.k3s_ssm_profile[0].name : ""
+  user_data = templatefile("${path.module}/../cluster/user_data.tpl", merge(local.user_data_common, {
+    NODE_INDEX      = count.index + 1
+    CLUSTER_INIT    = "false"
+    SERVER_JOIN_URL = "https://${module.k3s_server.private_ip}:6443"
+    TLS_HOST        = module.nlb[0].dns_name
+  }))
 
   public_ports = var.enable_tls ? [80, 443] : [80]
   admin_cidr   = var.admin_cidr

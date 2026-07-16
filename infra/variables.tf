@@ -113,6 +113,12 @@ variable "repo_ref" {
   default     = "main"
 }
 
+variable "ha_mode" {
+  description = "Deploy a high-availability control plane: 3 k3s server nodes spread across 3 AZs, each running embedded etcd, fronted by a public NLB for web traffic (80/443). Three servers give etcd an odd-sized quorum that tolerates the loss of one node while retaining a majority. When false (default) the stack is a single node in a single AZ with no NLB — byte-for-byte the legacy topology."
+  type        = bool
+  default     = false
+}
+
 variable "resource_name_suffix" {
   description = "Optional suffix appended to resource names (e.g. CI run id) so concurrent ephemeral environments don't collide on named resources (IAM role, SG)."
   type        = string

@@ -2,5 +2,5 @@ apiVersion: v2
 name: hello-world
 description: Go hello-world HTTP service — the deployable artifact of this repo's CI/CD pipeline
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "1.0.0"
