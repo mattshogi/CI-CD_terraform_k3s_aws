@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: app/go.mod
           cache: false
@@ -37,20 +37,20 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -58,7 +58,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: ./app
           platforms: linux/amd64,linux/arm64
@@ -74,9 +74,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: app/go.mod
           cache: false
@@ -95,7 +95,7 @@ jobs:
           ls -l dist/
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}

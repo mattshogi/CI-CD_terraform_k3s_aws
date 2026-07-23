@@ -29,11 +29,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials (OIDC)
         if: vars.AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: bake-ami-${{ github.run_id }}
@@ -41,7 +41,7 @@ jobs:
 
       - name: Configure AWS credentials (static keys fallback)
         if: vars.AWS_ROLE_ARN == ''
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
