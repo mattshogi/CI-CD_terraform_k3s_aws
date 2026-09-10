@@ -13,28 +13,35 @@ cluster with embedded etcd behind a network load balancer, and the deploy
 pipeline proves the HA claim by terminating one of its own nodes mid-run and
 checking that the service keeps answering.
 
+On top of that sits `platformctl`, an agent-operable ops layer: a person or an
+AI agent can drive these environments through one guarded code path, with
+optional AI assistance that stays off and costs nothing by default.
+
 Every non-obvious choice has a written rationale in [DESIGN.md](DESIGN.md),
-currently 14 decision records.
+currently 17 decision records.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     subgraph CI["GitHub Actions: ci.yml"]
-        A[Go: fmt / vet / staticcheck / test] --> B[Docker build to GHCR<br/>sha-pinned tag]
+        A[Go app: fmt / vet / staticcheck / test] --> B[Docker build to GHCR<br/>sha-pinned tag]
         A --> C[Terraform validate + TFLint]
         A --> D[Helm lint / render]
+        A --> PC[platformctl: build / test<br/>mocked exec, no cloud]
+        A --> PK[Packer validate]
         B --> E[Trivy image scan]
         F[Trivy IaC scan + gitleaks]
     end
 
     subgraph Deploy["deploy-ephemeral.yml (dispatch)"]
-        G[OIDC to AWS role] --> H[terraform apply<br/>state: s3://.../ephemeral/run_id]
+        G[OIDC to AWS role] --> H[terraform apply via deploy_env.sh<br/>state: s3://.../ephemeral/run_id]
         H --> I[EC2 user_data k3s bootstrap<br/>checksum-verified, ref-pinned]
         I --> J[helm install chart<br/>image = CI-built sha tag]
         J --> K[HTTP/HTTPS validation]
-        K --> L["chaos test (HA only):<br/>kill a node, validate again"]
-        L --> M[terraform destroy<br/>always runs]
+        K --> DS[platformctl deploy summary<br/>template, AI-polished when enabled]
+        DS --> L["chaos test (HA only):<br/>kill a node, validate again"]
+        L --> M[destroy via destroy_env.sh<br/>always runs]
     end
 
     CI -->|image + chart @ commit SHA| Deploy
@@ -71,6 +78,29 @@ flowchart TB
     end
 ```
 
+A person or an AI agent operates all of this through `platformctl`: one guarded
+core with a CLI and an MCP adapter over it, driving the same scripts CI uses.
+AI assistance is optional and off by default, and always has a deterministic,
+$0 fallback:
+
+```mermaid
+flowchart TB
+    H[Human] --> CLI[platformctl CLI]
+    AG[AI agent] --> MCP[platformctl-mcp<br/>stdio server]
+    CLI --> CORE
+    MCP --> CORE
+    subgraph GUARD["platformctl core, one guarded code path"]
+        CORE["engine + guardrails:<br/>action allowlist · dry-run default<br/>· TTL cap · concurrency cap · secret scrubbing"]
+    end
+    CORE -->|read tools: status, health, cost,<br/>triage, explain, list| RO[(S3 per-run state · Trivy · validate script)]
+    CORE -->|"write tools: deploy / destroy<br/>(same scripts CI uses)"| SC[scripts/deploy_env.sh<br/>scripts/destroy_env.sh] --> AWS[Terraform / AWS]
+    REAP[reaper.yml cron] -->|reaps envs past their TTL| SC
+    CORE -.->|optional: PLATFORMCTL_AI| AI{AI provider}
+    AI -->|none, the default| DET["deterministic Stage 1 output<br/>no network, $0"]
+    AI -->|byok or local Ollama| LLM[Anthropic / OpenAI / Ollama]
+    LLM -.->|on any error| DET
+```
+
 **Security posture.** Only the web ports (80, plus 443 when TLS is on) face
 the internet, in both topologies. The Kubernetes API is never behind the load
 balancer: HA servers join over the primary's private IP, cluster traffic
@@ -105,9 +135,9 @@ Parameter Store rather than code or logs.
 │   ├── modules/nlb/        #   network LB fronting the HA servers (80/443)
 │   └── bootstrap/github-oidc/  # one-time: OIDC provider, CI deploy role, ELB service-linked role
 ├── packer/                 # Pre-baked k3s node AMI template
-├── platformctl/            # Agent-operable ops layer: one core, CLI + MCP adapters
+├── platformctl/            # Agent-operable ops layer: core + CLI + MCP adapters + optional AI
 ├── scripts/                # deploy/destroy env, endpoint/cluster validation, SSM diagnostics
-└── .github/workflows/      # ci.yml, deploy-ephemeral.yml, bake-ami.yml, reaper.yml, release.yml
+└── .github/workflows/      # ci, deploy-ephemeral, reaper, ai-review, platformctl-integration, bake-ami, release
 ```
 
 ## Quick start (local)
@@ -163,8 +193,11 @@ One-time bootstrap, in order:
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | push / PR | Tests and lints everything (Go, Terraform, Helm, Packer), builds and pushes the image, scans it with Trivy, scans the IaC (gates on HIGH+), runs gitleaks and integration tests |
-| `deploy-ephemeral.yml` | manual dispatch | Provision, validate, destroy. Per-run S3 state key; deploys the CI-built image for the exact commit. Toggles for TLS, GitOps, baked AMI, and HA. HA runs include the chaos test |
+| `ci.yml` | push / PR | Tests and lints everything (Go app, platformctl, Terraform, Helm, Packer), builds and pushes the image, scans it with Trivy, scans the IaC (gates on HIGH+), runs gitleaks and integration tests |
+| `deploy-ephemeral.yml` | manual dispatch | Provision, validate, destroy. Per-run S3 state key; deploys the CI-built image for the exact commit. Toggles for TLS, GitOps, baked AMI, and HA; HA runs include the chaos test. Writes a platformctl deploy summary |
+| `reaper.yml` | cron (30 min) + dispatch | Destroys platformctl-created envs past their TTL. The auto-destroy path, on free minutes with no standing infra |
+| `ai-review.yml` | PR `ai-review` label / dispatch | Posts a security-findings summary as a single PR comment. Deterministic by default; AI-written when a key is set |
+| `platformctl-integration.yml` | manual dispatch | Drives platformctl against real AWS. A $0 dry-run by default; opt-in apply/destroy cycle |
 | `bake-ami.yml` | manual dispatch | Builds the pre-baked `k3s-node-*` AMI with Packer |
 | `release.yml` | `v*` tag | Multi-arch semver images plus a GitHub release with binaries |
 
