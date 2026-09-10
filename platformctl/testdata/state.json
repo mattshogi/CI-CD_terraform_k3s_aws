@@ -1,0 +1,14 @@
+{
+  "version": 4,
+  "terraform_version": "1.12.0",
+  "resources": [
+    {"type": "aws_instance", "name": "node", "instances": [{"attributes": {"id": "i-0abc"}}]},
+    {"type": "aws_security_group", "name": "node", "instances": [{"attributes": {"id": "sg-0abc"}}]}
+  ],
+  "outputs": {
+    "server_public_ip": {"value": "203.0.113.10"},
+    "endpoint_host": {"value": "203.0.113.10"},
+    "ha_mode": {"value": false},
+    "server_instance_ids": {"value": ["i-0abc"]}
+  }
+}
