@@ -1,0 +1,78 @@
+name: AI findings review (opt-in)
+
+# Opt-in only: runs when a PR gets the "ai-review" label, or on manual
+# dispatch. It never runs on an ordinary push, so no tokens burn automatically.
+# With no AI key it posts the deterministic triage summary; with
+# PLATFORMCTL_AI=byok + a key it posts an AI-written one. Either way it upserts
+# a single PR comment (no duplicates).
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  findings-summary:
+    name: Summarize security findings
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-review' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: platformctl/go.mod
+          cache: true
+
+      - name: Trivy config scan (JSON, non-blocking)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: json
+          output: trivy-config.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+
+      - name: Summarize findings
+        # AI is off unless PLATFORMCTL_AI is set to byok/local; the key comes
+        # from a secret and is never logged. No key means the deterministic
+        # summary, at $0.
+        env:
+          PLATFORMCTL_AI: ${{ vars.PLATFORMCTL_AI || 'none' }}
+          PLATFORMCTL_AI_API_KEY: ${{ secrets.PLATFORMCTL_AI_API_KEY }}
+          PLATFORMCTL_AI_PROVIDER: ${{ vars.PLATFORMCTL_AI_PROVIDER }}
+          PLATFORMCTL_AI_MODEL: ${{ vars.PLATFORMCTL_AI_MODEL }}
+        run: |
+          set -euo pipefail
+          cd platformctl && go build -o "${RUNNER_TEMP}/platformctl" ./cli && cd ..
+          {
+            echo '<!-- platformctl-findings -->'
+            echo "## Security findings summary (provider: ${PLATFORMCTL_AI})"
+            echo
+            "${RUNNER_TEMP}/platformctl" summarize-findings trivy-config.json
+          } > findings.md
+          cat findings.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Find existing comment
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/find-comment@v3
+        id: fc
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: "github-actions[bot]"
+          body-includes: "<!-- platformctl-findings -->"
+
+      - name: Upsert PR comment
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          edit-mode: replace
+          body-path: findings.md

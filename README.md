@@ -216,6 +216,17 @@ Point an MCP client (Claude Code, Cursor) at the `platformctl-mcp` binary and
 ask it to list envs, estimate cost, triage findings, or deploy a preview with a
 TTL. It gets a plan before anything is created and cannot exceed the caps.
 
+### Optional AI assistance
+
+Some tools can be AI-enhanced (a plain-language findings summary, a nicer
+failure explanation, a deploy summary), but AI is off by default. With no key
+configured, every feature falls back to the same deterministic output and the
+repo runs at $0 with no network call to any AI provider. Turn it on per the
+[platformctl AI docs](platformctl/README.md), either bring-your-own-key or a
+local Ollama model. In CI, the `ai-review` workflow posts a findings summary on
+a pull request only when you add the `ai-review` label, so no tokens burn on an
+ordinary push.
+
 ## Cost notes
 
 - `t3.micro` covers the bare cluster and app. Use `t3.small` or bigger once

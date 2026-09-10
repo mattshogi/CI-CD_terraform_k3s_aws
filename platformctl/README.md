@@ -92,6 +92,43 @@ Then ask the agent things like:
 The agent gets a plan before anything is created, cannot exceed the TTL cap,
 and cannot run any command outside the allowlist.
 
+## AI features (optional, off by default)
+
+Some tools can be AI-enhanced, but AI is off unless you turn it on, and every
+one falls back to deterministic output when it is off or errors. With no
+configuration the repo runs at $0 and makes no network call to any AI provider.
+
+Enhanced surfaces:
+
+- `explain` / `explain_last_failure`: the rule-based diagnosis is the fallback;
+  a provider adds a cleaner narrative from the same log.
+- `summarize-findings`: a ranked plain-language findings summary (the
+  deterministic ranking is the fallback). Used by the `ai-review` workflow.
+- `summarize-deploy`: a short deploy summary (a template is the fallback). Used
+  by the deploy workflow's job summary.
+
+Turn it on with an environment variable:
+
+| Env var | Effect |
+| --- | --- |
+| `PLATFORMCTL_AI` | `none` (default), `byok`, or `local` |
+| `PLATFORMCTL_AI_API_KEY` | key for `byok` (Anthropic or OpenAI); never logged |
+| `PLATFORMCTL_AI_PROVIDER` | `anthropic` (default) or `openai` for `byok` |
+| `PLATFORMCTL_AI_MODEL` | model id override |
+| `PLATFORMCTL_AI_OLLAMA_URL` | Ollama URL for `local` (default `http://localhost:11434`) |
+| `PLATFORMCTL_AI_CACHE` | cache directory override |
+
+The $0 local path uses Ollama:
+
+```bash
+ollama serve && ollama pull llama3.2
+PLATFORMCTL_AI=local ./platformctl summarize-findings trivy.json
+```
+
+Cost is bounded per call: inputs are truncated to a character ceiling, outputs
+are capped, and identical requests are served from an on-disk content cache so
+the same diff is never paid for twice.
+
 ## Configuration
 
 | Env var | Purpose | Default |

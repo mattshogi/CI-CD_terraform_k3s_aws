@@ -117,6 +117,14 @@ jobs:
           terraform_version: 1.12.x
           terraform_wrapper: false
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: platformctl/go.mod
+          cache: true
+
+      - name: Build platformctl (for the deploy summary)
+        run: cd platformctl && go build -o "${RUNNER_TEMP}/platformctl" ./cli
+
       - name: Deploy (provision + capture outputs)
         id: deploy
         # Orchestration lives in scripts/deploy_env.sh so the pipeline and
@@ -177,6 +185,30 @@ jobs:
           aws ssm get-command-invocation --command-id "$cid" --instance-id "$iid" \
             --query 'StandardOutputContent' --output text > ssm-diagnostics.txt || true
           echo "SSM diagnostics captured ($(wc -c < ssm-diagnostics.txt) bytes)"
+
+      - name: Deploy summary (platformctl; AI-polished when enabled)
+        if: steps.deploy.outputs.endpoint_host != ''
+        continue-on-error: true
+        env:
+          PLATFORMCTL_AI: ${{ vars.PLATFORMCTL_AI || 'none' }}
+          PLATFORMCTL_AI_API_KEY: ${{ secrets.PLATFORMCTL_AI_API_KEY }}
+          RUN_ID: ${{ github.run_id }}
+          IMAGE: ${{ steps.deploy.outputs.app_image }}
+          ENDPOINT: ${{ steps.deploy.outputs.endpoint_host }}
+          HA: ${{ inputs.ha_mode }}
+          ITYPE: ${{ inputs.instance_type }}
+          REACHABLE: ${{ steps.validate.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          topo=single; [ "$HA" = "true" ] && topo=ha
+          cents=$("${RUNNER_TEMP}/platformctl" cost "$ITYPE" "$topo" 20 | jq -r '.total_cents')
+          printf '{"run_id":"%s","image":"%s","endpoint":"%s","reachable":%s,"ha_mode":%s,"cost_cents":%s}\n' \
+            "$RUN_ID" "$IMAGE" "$ENDPOINT" "$REACHABLE" "$HA" "$cents" > facts.json
+          {
+            echo "## Deploy summary (provider: ${PLATFORMCTL_AI})"
+            echo
+            "${RUNNER_TEMP}/platformctl" summarize-deploy facts.json
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Job summary
         if: always()

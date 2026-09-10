@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mattshogi/CI-CD_terraform_k3s_aws/platformctl/ai"
 	"github.com/mattshogi/CI-CD_terraform_k3s_aws/platformctl/core"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,9 +22,10 @@ import (
 func main() {
 	cfg := core.DefaultConfig()
 	engine := core.New(cfg, core.ExecRunner{BaseDir: cfg.RepoRoot})
+	provider := ai.FromEnv() // None unless PLATFORMCTL_AI is set
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "platformctl", Version: "0.1.0"}, nil)
-	registerTools(s, engine, cfg)
+	registerTools(s, engine, provider, cfg)
 
 	if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("platformctl-mcp: %v", err)
@@ -66,7 +68,14 @@ type destroyInput struct {
 	Confirm bool   `json:"confirm" jsonschema:"false (default) is a dry-run; true destroys"`
 }
 
-func registerTools(s *mcp.Server, e *core.Engine, cfg core.Config) {
+// explainOutput carries the rule-based diagnosis plus an optional AI narrative.
+type explainOutput struct {
+	Diagnosis core.Diagnosis `json:"diagnosis"`
+	Narrative string         `json:"narrative"`
+	Provider  string         `json:"provider"`
+}
+
+func registerTools(s *mcp.Server, e *core.Engine, provider ai.Provider, cfg core.Config) {
 	mcp.AddTool(s, &mcp.Tool{Name: "list_envs", Description: "List active ephemeral environments."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, []core.Env, error) {
 			envs, err := e.ListEnvs(ctx)
@@ -123,15 +132,18 @@ func registerTools(s *mcp.Server, e *core.Engine, cfg core.Config) {
 			}
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "explain_last_failure", Description: "Rule-based root cause of a failed run."},
-		func(_ context.Context, _ *mcp.CallToolRequest, in explainInput) (*mcp.CallToolResult, core.Diagnosis, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "explain_last_failure", Description: "Root cause of a failed run: rule-based, with an AI narrative when enabled."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in explainInput) (*mcp.CallToolResult, explainOutput, error) {
 			logText := in.Log
 			if logText == "" {
 				if b, err := os.ReadFile(filepath.Join(cfg.RepoRoot, "terraform-apply.log")); err == nil {
 					logText = string(b)
 				}
 			}
-			return reply(core.ExplainLastFailure(logText))
+			d := core.ExplainLastFailure(logText)
+			fb := ai.FormatDiagnosis(d)
+			narrative, _ := provider.Summarize(ctx, ai.Request{Task: "failure", Prompt: logText + "\n\n" + fb, Fallback: fb})
+			return reply(explainOutput{Diagnosis: d, Narrative: core.Scrub(narrative), Provider: provider.Name()})
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "deploy_preview_env", Description: "Provision an ephemeral env. Dry-run unless confirm=true; requires ttl_minutes (capped)."},
