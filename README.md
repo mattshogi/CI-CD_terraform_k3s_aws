@@ -105,8 +105,9 @@ Parameter Store rather than code or logs.
 │   ├── modules/nlb/        #   network LB fronting the HA servers (80/443)
 │   └── bootstrap/github-oidc/  # one-time: OIDC provider, CI deploy role, ELB service-linked role
 ├── packer/                 # Pre-baked k3s node AMI template
-├── scripts/                # State bootstrap, endpoint/cluster validation, SSM diagnostics
-└── .github/workflows/      # ci.yml, deploy-ephemeral.yml, bake-ami.yml, release.yml
+├── platformctl/            # Agent-operable ops layer: one core, CLI + MCP adapters
+├── scripts/                # deploy/destroy env, endpoint/cluster validation, SSM diagnostics
+└── .github/workflows/      # ci.yml, deploy-ephemeral.yml, bake-ami.yml, reaper.yml, release.yml
 ```
 
 ## Quick start (local)
@@ -181,6 +182,39 @@ of a hunt through the console.
 | Hello World (NodePort) | `http://<ip>:30080/` | `admin_cidr` only |
 | Grafana | `http://<ip>:30030/` | `admin_cidr` only; password: `aws ssm get-parameter --name "$(terraform -chdir=infra output -raw grafana_password_ssm_parameter)" --with-decryption --query Parameter.Value --output text` |
 | Prometheus | `http://<ip>:30900/` | `admin_cidr` only |
+
+## Operating the platform with an agent
+
+The `platformctl/` layer lets a person or an AI agent drive these environments
+through one guarded code path. All logic lives in a single core package; a CLI
+and an MCP stdio server are thin adapters over it, so humans and agents run the
+identical commands and get identical data. See [platformctl/README.md](platformctl/README.md)
+for the full tool list and setup, and [DESIGN.md](DESIGN.md) records #15 and #16
+for the reasoning.
+
+The safety model is read is free, write is guarded:
+
+- Read tools (status, health, cost estimate, security triage, failure
+  explainer, list) run with no confirmation and never mutate anything.
+- Write tools (deploy, destroy) default to a dry-run and mutate only with an
+  explicit confirm.
+- A deploy needs a TTL within a hard cap and auto-destroys when it expires, so
+  an agent cannot leave cost running. The `reaper.yml` cron enforces that TTL
+  on free minutes with no standing infrastructure.
+- The engine can only run an allowlisted set of commands, and every result is
+  scrubbed for secrets before it is returned.
+
+Quick taste (no AWS needed for these):
+
+```bash
+cd platformctl && go build -o platformctl ./cli
+./platformctl cost t3.medium ha 20            # estimate a run
+./platformctl explain ../terraform-apply.log  # rule-based root cause
+```
+
+Point an MCP client (Claude Code, Cursor) at the `platformctl-mcp` binary and
+ask it to list envs, estimate cost, triage findings, or deploy a preview with a
+TTL. It gets a plan before anything is created and cannot exceed the caps.
 
 ## Cost notes
 
