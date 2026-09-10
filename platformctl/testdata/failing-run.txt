@@ -1,0 +1,5 @@
+[deploy_env] init (state key ephemeral/pctl-123.tfstate, mode apply)
+[deploy_env] apply
+module.network[0].aws_vpc.main: Creating...
+Error: creating EC2 VPC: operation error EC2: CreateVpc, https response error StatusCode: 400, api error VpcLimitExceeded: The maximum number of VPCs has been reached.
+[deploy_env] apply failed

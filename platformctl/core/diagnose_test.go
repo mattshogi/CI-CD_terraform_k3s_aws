@@ -6,7 +6,7 @@ import (
 )
 
 func TestExplainLastFailure(t *testing.T) {
-	log, err := os.ReadFile("../testdata/failing-run.log")
+	log, err := os.ReadFile("../testdata/failing-run.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
