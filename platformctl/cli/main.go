@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mattshogi/CI-CD_terraform_k3s_aws/platformctl/ai"
 	"github.com/mattshogi/CI-CD_terraform_k3s_aws/platformctl/core"
 )
 
@@ -23,15 +24,16 @@ func main() {
 	}
 	cfg := core.DefaultConfig()
 	engine := core.New(cfg, core.ExecRunner{BaseDir: cfg.RepoRoot})
+	provider := ai.FromEnv() // None unless PLATFORMCTL_AI is set
 	ctx := context.Background()
 
-	if err := dispatch(ctx, engine, os.Args[1], os.Args[2:]); err != nil {
+	if err := dispatch(ctx, engine, provider, os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func dispatch(ctx context.Context, e *core.Engine, cmd string, args []string) error {
+func dispatch(ctx context.Context, e *core.Engine, provider ai.Provider, cmd string, args []string) error {
 	switch cmd {
 	case "list-envs":
 		envs, err := e.ListEnvs(ctx)
@@ -97,11 +99,9 @@ func dispatch(ctx context.Context, e *core.Engine, cmd string, args []string) er
 		return emit(res)
 
 	case "explain":
-		path := ""
+		path := "terraform-apply.log"
 		if len(args) > 0 {
 			path = args[0]
-		} else {
-			path = "terraform-apply.log"
 		}
 		r, closeFn, err := openInput(path)
 		if err != nil {
@@ -109,7 +109,45 @@ func dispatch(ctx context.Context, e *core.Engine, cmd string, args []string) er
 		}
 		defer closeFn()
 		data, _ := io.ReadAll(r)
-		return emit(core.ExplainLastFailure(string(data)))
+		d := core.ExplainLastFailure(string(data))
+		fb := ai.FormatDiagnosis(d)
+		narrative, _ := provider.Summarize(ctx, ai.Request{Task: "failure", Prompt: string(data) + "\n\n" + fb, Fallback: fb})
+		return emit(struct {
+			Diagnosis core.Diagnosis `json:"diagnosis"`
+			Narrative string         `json:"narrative"`
+			Provider  string         `json:"provider"`
+		}{d, core.Scrub(narrative), provider.Name()})
+
+	case "summarize-findings":
+		r, closeFn, err := openInput(firstArg(args))
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		res, err := core.TriageSecurityFindings(r)
+		if err != nil {
+			return err
+		}
+		fb := ai.FormatFindings(res)
+		out, _ := provider.Summarize(ctx, ai.Request{Task: "security-findings", Prompt: fb, Fallback: fb})
+		fmt.Println(core.Scrub(out))
+		return nil
+
+	case "summarize-deploy":
+		r, closeFn, err := openInput(firstArg(args))
+		if err != nil {
+			return err
+		}
+		defer closeFn()
+		data, _ := io.ReadAll(r)
+		var s ai.DeploySummary
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("parse deploy summary json: %w", err)
+		}
+		fb := ai.FormatDeploy(s)
+		out, _ := provider.Summarize(ctx, ai.Request{Task: "deploy-summary", Prompt: fb, Fallback: fb})
+		fmt.Println(core.Scrub(out))
+		return nil
 
 	case "deploy":
 		fs := flag.NewFlagSet("deploy", flag.ExitOnError)
@@ -147,6 +185,14 @@ func dispatch(ctx context.Context, e *core.Engine, cmd string, args []string) er
 	}
 }
 
+// firstArg returns args[0], or "" (meaning stdin) when there are none.
+func firstArg(args []string) string {
+	if len(args) > 0 {
+		return args[0]
+	}
+	return ""
+}
+
 // openInput returns a reader for a file path, or stdin when path is "" or "-".
 func openInput(path string) (io.Reader, func(), error) {
 	if path == "" || path == "-" {
@@ -179,10 +225,16 @@ read tools:
   health <run_id>
   cost <instance_type> <single|ha> <minutes>
   triage [file|-] | triage --image <ref>
-  explain [logfile|-]
+  explain [logfile|-]                     (adds an AI narrative when PLATFORMCTL_AI is set)
+  summarize-findings [trivy.json|-]       (plain-language findings summary; AI-polished when enabled)
+  summarize-deploy [facts.json|-]         (deploy summary; AI-polished when enabled)
 
 write tools (dry-run by default; add --confirm to mutate):
   deploy --topology single|ha --ttl <minutes> [--confirm] [--image <ref>] [--run-id <id>]
   destroy <run_id> [--confirm]
+
+AI is off by default. Set PLATFORMCTL_AI=byok (with PLATFORMCTL_AI_API_KEY) or
+PLATFORMCTL_AI=local (Ollama) to enable it; every command falls back to
+deterministic output when AI is off or errors.
 `)+"\n")
 }
