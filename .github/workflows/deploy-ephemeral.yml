@@ -117,77 +117,28 @@ jobs:
           terraform_version: 1.12.x
           terraform_wrapper: false
 
-      - name: Resolve deploy-time variables
-        id: resolve
-        run: |
-          # Operator ports (kube API, NodePorts) open only to this runner's IP
-          echo "admin_cidr=$(curl -fsS https://checkip.amazonaws.com)/32" >> "$GITHUB_OUTPUT"
-          # Deploy the exact image CI built for this commit unless overridden
-          if [ -n "${IMAGE_REF_INPUT}" ]; then
-            echo "app_image=${IMAGE_REF_INPUT}" >> "$GITHUB_OUTPUT"
-          else
-            echo "app_image=ghcr.io/mattshogi/ci-cd_terraform_k3s_aws/hello-world:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Deploy (provision + capture outputs)
+        id: deploy
+        # Orchestration lives in scripts/deploy_env.sh so the pipeline and
+        # platformctl drive the same commands. admin_cidr and app_image are
+        # resolved inside the script; all other TF_VAR_* come from the job env.
         env:
-          IMAGE_REF_INPUT: ${{ inputs.image_ref }}
-
-      - name: Terraform init (remote state, per-run key)
-        id: init
-        working-directory: infra
+          RUN_ID: ${{ github.run_id }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          MODE: apply
+          IMAGE_REF: ${{ inputs.image_ref }}
+          GITHUB_SHA: ${{ github.sha }}
         run: |
-          terraform init -input=false \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=ephemeral/${{ github.run_id }}.tfstate" \
-            -backend-config="region=${AWS_REGION}" \
-            -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true"
-
-      - name: Terraform apply
-        id: apply
-        working-directory: infra
-        env:
-          TF_VAR_admin_cidr: ${{ steps.resolve.outputs.admin_cidr }}
-          TF_VAR_app_image: ${{ steps.resolve.outputs.app_image }}
-        run: |
-          set -o pipefail
-          if terraform apply -auto-approve -input=false 2>&1 | tee ../terraform-apply.log; then
-            echo "outcome=success" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Classify transient AWS failures and retry once
-          if grep -qiE 'Throttling|RequestLimitExceeded|NoSuchEntity|InvalidIAMInstanceProfile|ServiceUnavailable|InternalError|DependencyViolation' ../terraform-apply.log; then
-            echo "[WARN] Transient failure detected; retrying in 30s" >&2
-            sleep 30
-            if terraform apply -auto-approve -input=false 2>&1 | tee -a ../terraform-apply.log; then
-              echo "outcome=success" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-          echo "outcome=failure" >> "$GITHUB_OUTPUT"
-          echo "[ERROR] terraform apply failed (destroy still runs; state is in S3)" >&2
-          exit 1
-
-      - name: Capture outputs
-        id: tf_out
-        if: steps.apply.outputs.outcome == 'success'
-        working-directory: infra
-        run: |
-          echo "server_ip=$(terraform output -raw server_public_ip)" >> "$GITHUB_OUTPUT"
-          echo "instance_id=$(terraform output -raw server_instance_id)" >> "$GITHUB_OUTPUT"
-          # Stable host to validate: NLB DNS in HA mode, else the instance IP.
-          # Fall back to server_public_ip if endpoint_host is not (yet) defined.
-          endpoint_host="$(terraform output -raw endpoint_host 2>/dev/null || true)"
-          [ -n "$endpoint_host" ] || endpoint_host="$(terraform output -raw server_public_ip)"
-          echo "endpoint_host=$endpoint_host" >> "$GITHUB_OUTPUT"
-          # All server instance ids (HA: 3; single-node: 1) for the chaos step
-          echo "instance_ids=$(terraform output -json server_instance_ids 2>/dev/null || echo '[]')" >> "$GITHUB_OUTPUT"
+          chmod +x scripts/deploy_env.sh
+          scripts/deploy_env.sh
 
       - name: Validate endpoints
         id: validate
-        if: steps.tf_out.outputs.endpoint_host != ''
+        if: steps.deploy.outputs.endpoint_host != ''
         run: |
           chmod +x scripts/validate_endpoints.sh
-          scripts/validate_endpoints.sh "${{ steps.tf_out.outputs.endpoint_host }}" 45 10
+          scripts/validate_endpoints.sh "${{ steps.deploy.outputs.endpoint_host }}" 45 10
 
       - name: "Chaos: terminate one node, verify continued service"
         id: chaos
@@ -195,8 +146,8 @@ jobs:
         # Values flow through env (not inline interpolation) per this
         # workflow's injection-safety convention.
         env:
-          INSTANCE_IDS_JSON: ${{ steps.tf_out.outputs.instance_ids }}
-          ENDPOINT_HOST: ${{ steps.tf_out.outputs.endpoint_host }}
+          INSTANCE_IDS_JSON: ${{ steps.deploy.outputs.instance_ids }}
+          ENDPOINT_HOST: ${{ steps.deploy.outputs.endpoint_host }}
         run: |
           set -euo pipefail
           # Terminate the LAST server (node 0 runs the deployment tooling, so we
@@ -215,9 +166,9 @@ jobs:
           scripts/validate_endpoints.sh "$ENDPOINT_HOST" 12 10
 
       - name: SSM diagnostics (on validation failure)
-        if: failure() && steps.tf_out.outputs.instance_id != ''
+        if: failure() && steps.deploy.outputs.instance_id != ''
         run: |
-          iid="${{ steps.tf_out.outputs.instance_id }}"
+          iid="${{ steps.deploy.outputs.instance_id }}"
           cid=$(aws ssm send-command --instance-ids "$iid" \
             --document-name AWS-RunShellScript \
             --parameters 'commands=["k3s kubectl get nodes -o wide || true","k3s kubectl get pods -A -o wide | head -n 40 || true","k3s kubectl get svc,ingress -A || true","tail -n 150 /var/log/cloud-init-output.log || true"]' \
@@ -235,13 +186,13 @@ jobs:
             echo ""
             echo "| Item | Value |"
             echo "| --- | --- |"
-            echo "| Image | \`${{ steps.resolve.outputs.app_image }}\` |"
-            echo "| Server IP | \`${{ steps.tf_out.outputs.server_ip || 'n/a' }}\` |"
-            echo "| Endpoint host | \`${{ steps.tf_out.outputs.endpoint_host || 'n/a' }}\` |"
+            echo "| Image | \`${{ steps.deploy.outputs.app_image }}\` |"
+            echo "| Server IP | \`${{ steps.deploy.outputs.server_ip || 'n/a' }}\` |"
+            echo "| Endpoint host | \`${{ steps.deploy.outputs.endpoint_host || 'n/a' }}\` |"
             echo "| HA mode | ${{ inputs.ha_mode }} |"
-            echo "| Instance | \`${{ steps.tf_out.outputs.instance_id || 'n/a' }}\` |"
+            echo "| Instance | \`${{ steps.deploy.outputs.instance_id || 'n/a' }}\` |"
             echo "| State key | \`ephemeral/${{ github.run_id }}.tfstate\` |"
-            echo "| Apply | ${{ steps.apply.outputs.outcome || 'skipped' }} |"
+            echo "| Apply | ${{ steps.deploy.outcome }} |"
             echo "| Validation | ${{ steps.validate.outcome }} |"
             echo "| Chaos test | ${{ steps.chaos.outcome }} |"
             echo "| Destroyed | ${{ !inputs.keep_after_validate }} |"
@@ -258,11 +209,14 @@ jobs:
           if-no-files-found: ignore
 
       - name: Terraform destroy
-        # Runs even when apply/validation failed — the per-run remote state
-        # key means partial creations are tracked and torn down.
-        if: always() && steps.init.outcome == 'success' && !inputs.keep_after_validate
-        working-directory: infra
+        # Runs even when apply/validation failed: the per-run remote state key
+        # means partial creations are tracked and torn down. Same script the
+        # agent layer calls, so teardown is one code path.
+        if: always() && steps.deploy.outcome != 'skipped' && !inputs.keep_after_validate
         env:
-          TF_VAR_admin_cidr: ${{ steps.resolve.outputs.admin_cidr }}
-          TF_VAR_app_image: ${{ steps.resolve.outputs.app_image }}
-        run: terraform destroy -auto-approve -input=false
+          RUN_ID: ${{ github.run_id }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          chmod +x scripts/destroy_env.sh
+          scripts/destroy_env.sh

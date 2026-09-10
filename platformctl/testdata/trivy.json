@@ -1,0 +1,18 @@
+{
+  "Results": [
+    {
+      "Target": "ghcr.io/mattshogi/ci-cd_terraform_k3s_aws/hello-world (alpine 3.18)",
+      "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-2024-0001", "PkgName": "libcrypto3", "InstalledVersion": "3.1.0", "FixedVersion": "3.1.4", "Severity": "CRITICAL", "Title": "heap buffer overflow"},
+        {"VulnerabilityID": "CVE-2024-0002", "PkgName": "libssl3", "InstalledVersion": "3.1.0", "FixedVersion": "", "Severity": "HIGH", "Title": "information disclosure"},
+        {"VulnerabilityID": "CVE-2024-0001", "PkgName": "libcrypto3", "InstalledVersion": "3.1.0", "FixedVersion": "3.1.4", "Severity": "CRITICAL", "Title": "heap buffer overflow"}
+      ]
+    },
+    {
+      "Target": "infra/modules/k3s-node/main.tf",
+      "Misconfigurations": [
+        {"ID": "AVD-AWS-0107", "Title": "Security group allows ingress from 0.0.0.0/0", "Severity": "MEDIUM", "Resolution": "Restrict the ingress rule to admin_cidr"}
+      ]
+    }
+  ]
+}

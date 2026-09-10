@@ -206,8 +206,52 @@ workflow terminates one server (the last in the list; node 0 runs the deploy
 tooling) and re-validates through the NLB — the run fails if service didn't
 survive.
 
+## 15. One core package, two adapters (CLI and MCP)
+
+**Choice:** all platform operations live in `platformctl/core`, and the CLI
+and the MCP server are thin adapters over it. Every subcommand and every MCP
+tool maps 1:1 to a core function.
+**Rejected:** a standalone CLI plus a separately implemented MCP server; an
+agent server that re-implements the deploy logic.
+
+Two implementations of "deploy an env" would drift, and the moment they drift
+the demo stops being credible. One core package means a human at the CLI and
+an agent over MCP drive the exact same guarded code path and get identical
+data back. It is the same reasoning as "one Helm chart is the only deployment
+definition" (#6), applied to operations. The core also refuses to fork the
+pipeline: it shells out to the same `scripts/deploy_env.sh` and
+`destroy_env.sh` the deploy workflow calls, so there is a single source of
+truth for actions across humans, agents, and CI.
+
+The guardrails are the interesting part, not the tool count. Read tools run
+freely; write tools default to a dry-run and mutate only with `confirm=true`;
+a deploy needs a TTL within a hard cap; the engine can only run an allowlisted
+set of commands; and every result is scrubbed for secrets before it leaves.
+An agent can operate real infrastructure without being able to run away with
+cost or leak a credential.
+
+## 16. TTL auto-destroy by sidecar and a free cron reaper
+
+**Choice:** when platformctl applies an env it writes a small
+`ephemeral/<id>.meta.json` sidecar to the state bucket carrying `expires_at`,
+and a scheduled GitHub Actions workflow (`reaper.yml`, every 30 minutes)
+destroys any env past its expiry.
+**Rejected:** an always-on timer or Lambda; relying on the caller to tear
+down; instance tags alone.
+
+The ephemeral discipline (#2) has to hold even when an agent is driving, but
+the cost constraint forbids standing infrastructure. A sidecar plus free cron
+minutes gives a real auto-destroy path with nothing running between reaps. The
+sidecar is written before apply, so even a failed apply is reap-able, and
+CI-run envs (which carry no sidecar) are left alone because they self-destroy
+in their own workflow. This is what lets "TTL is mandatory" mean something
+rather than being aspirational.
+
 ## Known limitations / future work
 
+- Stage 2 of the agent layer: optional AI assistance (a PR findings
+  summarizer, an LLM-enhanced failure explainer) that stays off by default and
+  falls back to the deterministic Stage 1 output when no key is present.
 - Let's Encrypt issuer + real domain for browser-trusted TLS (see #11).
 - Larger quorum (5 servers → tolerates 2 losses) and scheduled/periodic chaos
   runs to catch resilience regressions between deploys, rather than only on an
