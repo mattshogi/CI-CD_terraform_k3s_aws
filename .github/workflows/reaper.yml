@@ -1,0 +1,83 @@
+name: Reap expired ephemeral envs
+
+# The TTL auto-destroy path for platformctl-created envs, done with free cron
+# minutes instead of any standing infrastructure. platformctl writes a
+# ephemeral/<id>.meta.json sidecar carrying expires_at when it applies an env;
+# this job destroys any env whose expiry has passed. CI-run envs (which have no
+# meta sidecar) self-destroy in their own workflow and are left alone here.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: reaper
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  reap:
+    name: Destroy expired envs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ vars.TF_STATE_BUCKET != '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        if: vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: reaper-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: vars.AWS_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.x
+          terraform_wrapper: false
+
+      - name: Reap expired envs
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+          metas=$(aws s3 ls "s3://${TF_STATE_BUCKET}/ephemeral/" | awk '{print $4}' | grep '\.meta\.json$' || true)
+          if [ -z "$metas" ]; then echo "no TTL-tagged envs"; exit 0; fi
+          reaped=0
+          for key in $metas; do
+            id="${key%.meta.json}"
+            body=$(aws s3 cp "s3://${TF_STATE_BUCKET}/ephemeral/${key}" - 2>/dev/null || true)
+            exp=$(printf '%s' "$body" | jq -r '.expires_at // empty')
+            [ -n "$exp" ] || continue
+            exp_s=$(date -u -d "$exp" +%s 2>/dev/null || true)
+            [ -n "$exp_s" ] || continue
+            if [ "$now" -ge "$exp_s" ]; then
+              ha=$(printf '%s' "$body" | jq -r '.topology // "single"')
+              if [ "$ha" = "ha" ]; then export TF_VAR_ha_mode=true; else export TF_VAR_ha_mode=false; fi
+              echo "[reaper] env ${id} expired at ${exp}; destroying (topology=${ha})"
+              RUN_ID="$id" scripts/destroy_env.sh || echo "[reaper] destroy failed for ${id} (continuing)"
+              aws s3 rm "s3://${TF_STATE_BUCKET}/ephemeral/${id}.tfstate" || true
+              aws s3 rm "s3://${TF_STATE_BUCKET}/ephemeral/${key}" || true
+              reaped=$((reaped + 1))
+            else
+              echo "[reaper] env ${id} not yet expired (${exp})"
+            fi
+          done
+          echo "[reaper] reaped ${reaped} env(s)"

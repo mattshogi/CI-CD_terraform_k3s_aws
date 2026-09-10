@@ -1,0 +1,79 @@
+name: platformctl integration (manual)
+
+# Manual-only. Never fires on push, so it never costs money automatically.
+# The default run is a $0 dry-run: it builds platformctl and drives a deploy
+# PLAN plus list-envs through real OIDC + Terraform, creating nothing. Set
+# run_apply=true to exercise a full apply+destroy cycle (a few cents).
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_apply:
+        description: Apply then destroy a single-node env (costs a few cents)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  integration:
+    name: Drive platformctl against real AWS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ vars.TF_STATE_BUCKET != '' }}
+    env:
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        if: vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: pctl-integration-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: vars.AWS_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.x
+          terraform_wrapper: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: platformctl/go.mod
+          cache: false
+
+      - name: Build platformctl
+        run: cd platformctl && go build -o "${RUNNER_TEMP}/platformctl" ./cli
+
+      - name: Dry-run deploy plan (creates nothing)
+        run: |
+          "${RUNNER_TEMP}/platformctl" deploy --topology single --ttl 30
+
+      - name: List envs
+        run: |
+          "${RUNNER_TEMP}/platformctl" list-envs
+
+      - name: Apply and destroy cycle (opt-in)
+        if: inputs.run_apply == true
+        run: |
+          set -euo pipefail
+          out="$("${RUNNER_TEMP}/platformctl" deploy --topology single --ttl 30 --confirm)"
+          echo "$out"
+          rid="$(printf '%s' "$out" | jq -r '.run_id')"
+          "${RUNNER_TEMP}/platformctl" status "$rid"
+          "${RUNNER_TEMP}/platformctl" destroy "$rid" --confirm

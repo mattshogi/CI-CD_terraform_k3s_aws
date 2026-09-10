@@ -54,6 +54,42 @@ jobs:
         working-directory: app
         run: go build -o hello-world .
 
+  platformctl:
+    name: platformctl — format, vet, staticcheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: platformctl/go.mod
+          cache: true
+
+      - name: gofmt check
+        working-directory: platformctl
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        working-directory: platformctl
+        run: go vet ./...
+
+      - name: staticcheck
+        working-directory: platformctl
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+      - name: go test (mocked exec, no cloud)
+        working-directory: platformctl
+        run: go test -race ./...
+
+      - name: go build
+        working-directory: platformctl
+        run: go build ./...
+
   docker:
     name: Docker — build & push image
     runs-on: ubuntu-latest
