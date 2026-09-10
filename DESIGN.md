@@ -247,11 +247,32 @@ CI-run envs (which carry no sidecar) are left alone because they self-destroy
 in their own workflow. This is what lets "TTL is mandatory" mean something
 rather than being aspirational.
 
+## 17. AI as an opt-in enhancement, never a dependency
+
+**Choice:** AI assistance (a findings summarizer, a nicer failure explainer, a
+deploy summary) sits behind a provider abstraction whose default is None. None
+returns the deterministic Stage 1 text, makes no network call, and costs
+nothing. A real provider only ever improves output, and any error falls back to
+the deterministic text.
+**Rejected:** an AI feature that the pipeline depends on; a hosted AI service;
+AI that runs on every push.
+
+The repo has to run at $0 for anyone who clones it, and a security or deploy
+pipeline cannot hinge on a model being reachable. So AI is strictly additive:
+the deterministic path (Stage 1's rule-based triage, diagnosis, and templates)
+is always present and is exactly what the AI falls back to. Selection is one
+env var (`PLATFORMCTL_AI`); the key is bring-your-own via a secret and is never
+logged, or you point at a local Ollama model for a $0 path.
+
+Cost is bounded on purpose. AI jobs run only on demand (the PR summarizer is
+gated behind an `ai-review` label, never a push), inputs are truncated to a
+character ceiling, outputs are capped, and identical requests are served from a
+content-hash cache so the same diff is never paid for twice. The interesting
+claim is not that AI is present, but that it is present without adding cost,
+fragility, or a mandatory dependency.
+
 ## Known limitations / future work
 
-- Stage 2 of the agent layer: optional AI assistance (a PR findings
-  summarizer, an LLM-enhanced failure explainer) that stays off by default and
-  falls back to the deterministic Stage 1 output when no key is present.
 - Let's Encrypt issuer + real domain for browser-trusted TLS (see #11).
 - Larger quorum (5 servers → tolerates 2 losses) and scheduled/periodic chaos
   runs to catch resilience regressions between deploys, rather than only on an
